@@ -1,0 +1,439 @@
+---
+title: "HTR8_Primary_MEHP_RNAseq_Comparison"
+author: "Samantha Lapehn Young"
+date: "3/29/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## HTR-8/SVneo and Primary Trophoblast RNAseq with MEHP Comparison
+This files pulls in gene, pathway, and transcription factor results from individual HTR_8/SVneo and Primary Trophoblast analysis of MEHP RNAseq results in order to make comparisons and figures combining the results of the two cell lines. 
+
+
+## Load Packages
+```{r Packages}
+library(tidyverse)
+library(scales)
+library(pheatmap)
+library(dichromat)
+library(UpSetR)
+```
+
+## Upload Pathway Data from HTR-8/SVneo and Primary Cells
+Read in significant pathways from Fry for HTR-8/SVneo and Primary Trophoblast Cell for comparison. Last read in: March 29, 2022
+```{r Pathway Upload}
+# Primary Cell Pathway Data
+Primary_Fry_90uM <- read.csv("/Volumes/paquette_a/slapehn/PrimaryTrophoblast_Phthalate_RNAseq/PrimaryTrophoblast_MEHP_RNAseq_Final/Pathway_Files/PrimaryTrophoblast_Sig_Fry_MEHP_90uM.csv")
+
+Primary_Fry_180uM <- read.csv("/Volumes/paquette_a/slapehn/PrimaryTrophoblast_Phthalate_RNAseq/PrimaryTrophoblast_MEHP_RNAseq_Final/Pathway_Files/PrimaryTrophoblast_Sig_Fry_MEHP_180uM.csv")
+
+# HTR-8/SVneo Cell Pathway Data
+HTR8_Fry_90uM <- read.csv("/Volumes/paquette_a/slapehn/Phthalate_RNAseq_CombinedAnalysis/MEHP_HTR8_CPM/Pathway_Files/HTR8_Fry_FDR_MEHP_90.csv")
+
+HTR8_Fry_180uM <- read.csv("/Volumes/paquette_a/slapehn/Phthalate_RNAseq_CombinedAnalysis/MEHP_HTR8_CPM/Pathway_Files/HTR8_Fry_FDR_MEHP_180.csv")
+```
+
+## Find Pathways that are Shared
+Identify overlapping pathways between primary and HTR-8/SVneo cells exposed to MEHP. 
+```{r Pathway combine}
+#Create a full join of all pathways across cell type and concentrations
+All_Primary_Pathways <- full_join(Primary_Fry_90uM, Primary_Fry_180uM, by=c("ID"), suffix=c("_P90", "_P180"))
+All_HTR8_Pathways <- full_join(HTR8_Fry_90uM, HTR8_Fry_180uM, by=c("ID"), suffix=c("_H90", "_H180"))
+All_Pathways <- inner_join(All_Primary_Pathways, All_HTR8_Pathways, by=c("ID"))
+#Export to rearrange for bubble plot
+write.csv(All_Pathways, "/Volumes/paquette_a/slapehn/HTR8_Primary_MEHP_RNAseq_Comparison/Pathway_Files/All_Pathways.csv")
+```
+
+## Visualize Shared Pathways
+Upload rearranged file of shared pathways that appear in at least two cell or concentration groups. Visualize shared pathways as a bubble plot.
+```{r shared pathway visualize, fig.width=4}
+#Upload Rearranged File of Shared Pathways
+Shared_Pathways <- read.csv("/Volumes/paquette_a/slapehn/HTR8_Primary_MEHP_RNAseq_Comparison/Pathway_Files/Shared_Pathways.csv")
+
+Shared_Pathways$Group <- factor(Shared_Pathways$Group, levels=c("90uM HTR-8", "180uM HTR-8", "90uM Primary", "180uM Primary"))
+Shared_Pathways$Pathway <- factor(Shared_Pathways$Pathway)
+Shared_Pathways$Pathway <- reorder(Shared_Pathways$Pathway, Shared_Pathways$Sort)
+Shared_Pathways$KEGG.Category <- factor(Shared_Pathways$KEGG.Category)
+
+ggplot(Shared_Pathways, aes(x=Group, y=Pathway, color=Direction)) + 
+  geom_point(aes(size = -log10(FDR))) +
+  theme_bw() +
+  ggtitle("Shared KEGG Pathways") + 
+  scale_color_manual(values=c("Up"="#F09062", "Down"="#0092B3"))+
+  theme(plot.title=element_text(size=10), axis.text.x=element_text(size=8), axis.text.y=element_text(size=10))  +
+  scale_x_discrete(labels=wrap_format(10))
+```
+## Transcription Factor of Interest Upload
+Uploading files of signficant TFs of interest (PPARG, AR, ESR1, PPARD)from the Enrichr analysis (https://maayanlab.cloud/Enrichr/) including downstream DEGs and logFCs
+```{r TF Upload}
+# Upload HTR-8/SVneo Files for PPARG, PPARD, AR, ESR1
+PPARG_HTR8_90 <- read.csv("/Volumes/paquette_a/slapehn/Phthalate_RNAseq_CombinedAnalysis/MEHP_HTR8_CPM/TF_Files/Targeted_TF_Genes_forHeatmap/PPARG_90uM_HTR8.csv")
+PPARG_HTR8_180 <- read.csv("/Volumes/paquette_a/slapehn/Phthalate_RNAseq_CombinedAnalysis/MEHP_HTR8_CPM/TF_Files/Targeted_TF_Genes_forHeatmap/PPARG_180uM_HTR8.csv")
+PPARD_HTR8_90 <- read.csv("/Volumes/paquette_a/slapehn/Phthalate_RNAseq_CombinedAnalysis/MEHP_HTR8_CPM/TF_Files/Targeted_TF_Genes_forHeatmap/PPARD_90uM_HTR8.csv")
+PPARD_HTR8_180 <- read.csv("/Volumes/paquette_a/slapehn/Phthalate_RNAseq_CombinedAnalysis/MEHP_HTR8_CPM/TF_Files/Targeted_TF_Genes_forHeatmap/PPARD_180uM_HTR8.csv")
+AR_HTR8_90 <- read.csv("/Volumes/paquette_a/slapehn/Phthalate_RNAseq_CombinedAnalysis/MEHP_HTR8_CPM/TF_Files/Targeted_TF_Genes_forHeatmap/AR_90uM_HTR8.csv")
+AR_HTR8_180 <- read.csv("/Volumes/paquette_a/slapehn/Phthalate_RNAseq_CombinedAnalysis/MEHP_HTR8_CPM/TF_Files/Targeted_TF_Genes_forHeatmap/AR_180uM_HTR8.csv")
+ESR1_HTR8_90 <- read.csv("/Volumes/paquette_a/slapehn/Phthalate_RNAseq_CombinedAnalysis/MEHP_HTR8_CPM/TF_Files/Targeted_TF_Genes_forHeatmap/ESR1_90uM_HTR8.csv")
+ESR1_HTR8_180 <- read.csv("/Volumes/paquette_a/slapehn/Phthalate_RNAseq_CombinedAnalysis/MEHP_HTR8_CPM/TF_Files/Targeted_TF_Genes_forHeatmap/ESR1_180uM_HTR8.csv")
+
+# Upload Primary Cell Files for PPARG, PPARD, AR, ESR1 (ESR1 and AR not sig in 90uM MEHP group)
+PPARG_Primary_180 <- read.csv("/Volumes/paquette_a/slapehn/PrimaryTrophoblast_Phthalate_RNAseq/PrimaryTrophoblast_MEHP_RNAseq_Final/TF_Files/Targeted_TF_forHeatmap/PPARG_180uM_Primary.csv")
+PPARD_Primary_180 <- read.csv("/Volumes/paquette_a/slapehn/PrimaryTrophoblast_Phthalate_RNAseq/PrimaryTrophoblast_MEHP_RNAseq_Final/TF_Files/Targeted_TF_forHeatmap/PPARD_180uM_Primary.csv")
+AR_Primary_180 <- read.csv("/Volumes/paquette_a/slapehn/PrimaryTrophoblast_Phthalate_RNAseq/PrimaryTrophoblast_MEHP_RNAseq_Final/TF_Files/Targeted_TF_forHeatmap/AR_180uM_Primary.csv")
+ESR1_Primary_180 <- read.csv("/Volumes/paquette_a/slapehn/PrimaryTrophoblast_Phthalate_RNAseq/PrimaryTrophoblast_MEHP_RNAseq_Final/TF_Files/Targeted_TF_forHeatmap/ESR1_180uM_Primary.csv")
+PPARG_Primary_90 <- read.csv("/Volumes/paquette_a/slapehn/PrimaryTrophoblast_Phthalate_RNAseq/PrimaryTrophoblast_MEHP_RNAseq_Final/TF_Files/Targeted_TF_forHeatmap/PPARG_90uM_Primary.csv")
+PPARD_Primary_90 <- read.csv("/Volumes/paquette_a/slapehn/PrimaryTrophoblast_Phthalate_RNAseq/PrimaryTrophoblast_MEHP_RNAseq_Final/TF_Files/Targeted_TF_forHeatmap/PPARD_90uM_Primary.csv")
+
+## Upload Male Primary TFs
+
+PPARG_Male_180 <- read.csv("/Volumes/paquette_a/slapehn/PrimaryTrophoblast_Phthalate_RNAseq/Male_PrimaryTrophoblast_Final/TF_Files/PPARG_180uM_Male.csv")
+PPARG_Male_90 <- read.csv("/Volumes/paquette_a/slapehn/PrimaryTrophoblast_Phthalate_RNAseq/Male_PrimaryTrophoblast_Final/TF_Files/PPARG_90uM_Male.csv")
+PPARD_Male_90 <- read.csv("/Volumes/paquette_a/slapehn/PrimaryTrophoblast_Phthalate_RNAseq/Male_PrimaryTrophoblast_Final/TF_Files/PPARD_90uM_Male.csv")
+```
+
+## PPARG Combined
+Create dataframe containing all downstream DEGs for various concentration groups/cell lines for PPARG. 
+```{r PPARG Combine}
+PPARG_HTR8<- full_join (PPARG_HTR8_90, PPARG_HTR8_180, by=c("Gene"), suffix=c("_H90", "_H180"))
+PPARG_Primary <- full_join(PPARG_Primary_90, PPARG_Primary_180, by=c("Gene"), suffix=c("_P90", "_P180"))
+PPARG_Male <- full_join(PPARG_Male_90, PPARG_Male_180, by=c("Gene"), suffix=c("_M90", "_M180"))
+PPARG_Step1 <- full_join(PPARG_HTR8, PPARG_Primary, by=c("Gene"), suffix=c("_HTR8", "_Primary")) 
+
+PPARG <- full_join(PPARG_Step1, PPARG_Male, by=c("Gene")) %>% 
+  dplyr::select("Gene", "logFC_H90", "FDR_H90", "logFC_H180", "FDR_H180", "logFC_P90", "FDR_P90", "logFC_P180", "FDR_P180", "logFC_M90", "FDR_M90", "logFC_M180", "FDR_M180")
+write.csv(PPARG, "/Volumes/paquette_a/slapehn/HTR8_Primary_MEHP_RNAseq_Comparison/TF_Files/PPARG.csv")
+```
+
+## PPARD Combined
+Create dataframe containing all downstream DEGs for various concentration groups/cell lines for PPARD. 
+```{r PPARD Combine}
+PPARD_HTR8<- full_join (PPARD_HTR8_90, PPARD_HTR8_180, by=c("Gene"), suffix=c("_H90", "_H180"))
+PPARD_Primary <- full_join(PPARD_Primary_90, PPARD_Primary_180, by=c("Gene"), suffix=c("_P90", "_P180"))
+PPARD_Step1 <- full_join(PPARD_HTR8, PPARD_Primary, by=c("Gene"), suffix=c("_HTR8", "_Primary")) 
+
+PPARD <-full_join(PPARD_Step1, PPARD_Male_90, by=c("Gene")) %>% 
+  dplyr::select("Gene", "logFC_H90", "FDR_H90", "logFC_H180", "FDR_H180", "logFC_P90", "FDR_P90", "logFC_P180", "FDR_P180", "logFC", "FDR")
+write.csv(PPARD, "/Volumes/paquette_a/slapehn/HTR8_Primary_MEHP_RNAseq_Comparison/TF_Files/PPARD.csv")
+```
+
+## AR Combined
+Create dataframe containing all downstream DEGs for various concentration groups/cell lines for AR. 
+```{r AR Combine}
+AR_HTR8<- full_join (AR_HTR8_90, AR_HTR8_180, by=c("Gene"), suffix=c("_H90", "_H180"))
+AR <- full_join(AR_HTR8, AR_Primary_180, by=c("Gene")) %>% 
+  dplyr::select("Gene", "logFC_H90", "FDR_H90", "logFC_H180", "FDR_H180", "logFC", "FDR")
+write.csv(AR, "/Volumes/paquette_a/slapehn/HTR8_Primary_MEHP_RNAseq_Comparison/TF_Files/AR.csv")
+```
+
+## ESR1 Combined
+Create dataframe containing all downstream DEGs for various concentration groups/cell lines for ESR1. 
+```{r ESR1 Combine}
+ESR1_HTR8<- full_join (ESR1_HTR8_90, ESR1_HTR8_180, by=c("Gene"), suffix=c("_H90", "_H180"))
+ESR1 <- full_join(ESR1_HTR8, ESR1_Primary_180, by=c("Gene")) %>% 
+  dplyr::select("Gene", "logFC_H90", "FDR_H90", "logFC_H180", "FDR_H180", "logFC", "FDR")
+write.csv(ESR1, "/Volumes/paquette_a/slapehn/HTR8_Primary_MEHP_RNAseq_Comparison/TF_Files/ESR1.csv")
+```
+
+## PPARG Heatmaps
+Including one full PPARG heatmap of all downstream DEGs and a second "condensed" heatmap with only DEGs that are found in at least two groups
+```{r PPARG Heatmaps, fig.width=13}
+# Full Heatmap for PPARG
+PPARG_Heatmap<- read.csv("/Volumes/paquette_a/slapehn/HTR8_Primary_MEHP_RNAseq_Comparison/TF_Files/PPARG_for_Heatmap.csv")
+
+rownames(PPARG_Heatmap) <- PPARG_Heatmap$Gene
+PPARG_forHeatmapReady <- PPARG_Heatmap[,c(-1)] 
+
+PPARG_Matrix<- data.matrix(PPARG_forHeatmapReady)
+PPARG_Matrix_Final<- t(PPARG_Matrix)
+PPARG_Breaks<-seq(-3.5,3.5, length.out=31)
+
+pheatmap(PPARG_Matrix_Final,
+         color = colorRampPalette(c("#0092B3", "White", "#F09062"))(31),
+         breaks=PPARG_Breaks,
+         scale='none',# unscaled data
+         na.color="grey",
+         cluster_rows =F,
+         cluster_cols=F,
+         na_col="grey",
+         cellwidth=5, #Change tehe for size
+         cellheight=20, #change these for size
+         treeheight_row = 0,
+         fontsize_col = 4, 
+         main="PPARG")
+
+# Condensed Heatmap for PPARG
+PPARG_Heatmap_Condensed<- read.csv("/Volumes/paquette_a/slapehn/HTR8_Primary_MEHP_RNAseq_Comparison/TF_Files/PPARG_for_Heatmap_Condensed.csv")
+
+rownames(PPARG_Heatmap_Condensed) <- PPARG_Heatmap_Condensed$Gene
+PPARG_forHeatmapReady_Condensed <- PPARG_Heatmap_Condensed[,c(-1)] 
+
+PPARG_Matrix_Condensed<- data.matrix(PPARG_forHeatmapReady_Condensed)
+PPARG_Matrix_Final_Condensed<- t(PPARG_Matrix_Condensed)
+PPARG_Breaks<-seq(-3.5,3.5, length.out=31)
+
+pheatmap(PPARG_Matrix_Final_Condensed,
+         color = colorRampPalette(c("#0092B3", "White", "#F09062"))(31),
+         breaks=PPARG_Breaks,
+         scale='none',# unscaled data
+         na.color="grey",
+         cluster_rows =F,
+         cluster_cols=F,
+         na_col="grey",
+         cellwidth=5, #Change tehe for size
+         cellheight=20, #change these for size
+         treeheight_row = 0,
+         fontsize_col = 4, 
+         main="PPARG")
+```
+## AR Heatmaps
+Including one full AR heatmap of all downstream DEGs and a second "condensed" heatmap with only DEGs that are found in at least two groups
+```{r AR Heatmaps, fig.width=10}
+# Full AR Heatmap
+AR_Heatmap<- read.csv("/Volumes/paquette_a/slapehn/HTR8_Primary_MEHP_RNAseq_Comparison/TF_Files/AR_for_Heatmap.csv")
+
+rownames(AR_Heatmap) <- AR_Heatmap$Gene
+AR_forHeatmapReady <- AR_Heatmap[,c(-1)] 
+
+AR_Matrix<- data.matrix(AR_forHeatmapReady)
+AR_Matrix_Final<- t(AR_Matrix)
+AR_Breaks=seq(-2.5,2.5, length.out=31)
+pheatmap(AR_Matrix_Final,
+         color = colorRampPalette(c("#0092B3", "White", "#F09062"))(31),
+         breaks=AR_Breaks,
+         scale='none',# unscaled data
+         na.color="grey",
+         cluster_rows =F,
+         cluster_cols=F,
+         na_col="grey",
+         cellwidth=5, #Change tehe for size
+         cellheight=20, #change these for size
+         treeheight_row = 0,
+         fontsize_col = 4,
+         main="AR")
+
+# AR Heatmap Condensed
+AR_Heatmap_Condensed<- read.csv("/Volumes/paquette_a/slapehn/HTR8_Primary_MEHP_RNAseq_Comparison/TF_Files/AR_for_Heatmap_Condensed.csv")
+
+rownames(AR_Heatmap_Condensed) <- AR_Heatmap_Condensed$Gene
+AR_forHeatmapReady_Condensed <- AR_Heatmap_Condensed[,c(-1)] 
+
+AR_Matrix_Condensed<- data.matrix(AR_forHeatmapReady_Condensed)
+AR_Matrix_Final_Condensed<- t(AR_Matrix_Condensed)
+AR_Breaks=seq(-2.5,2.5, length.out=31)
+
+pheatmap(AR_Matrix_Final_Condensed,
+         color = colorRampPalette(c("#0092B3", "White", "#F09062"))(31),
+         breaks=AR_Breaks,
+         scale='none',# unscaled data
+         na.color="grey",
+         cluster_rows =F,
+         cluster_cols=F,
+         na_col="grey",
+         cellwidth=5, #Change tehe for size
+         cellheight=20, #change these for size
+         treeheight_row = 0,
+         fontsize_col = 4,
+         main="AR")
+```
+## ESR1 Heatmaps
+Including one full ESR1 heatmap of all downstream DEGs and a second "condensed" heatmap with only DEGs that are found in at least two groups
+```{r ESR1 Heatmaps, fig.width=6}
+# Full ESR1 Heatmap
+ESR1_Heatmap<- read.csv("/Volumes/paquette_a/slapehn/HTR8_Primary_MEHP_RNAseq_Comparison/TF_Files/ESR1_for_Heatmap.csv")
+
+rownames(ESR1_Heatmap) <- ESR1_Heatmap$Gene
+ESR1_forHeatmapReady <- ESR1_Heatmap[,c(-1)] 
+
+ESR1_Matrix<- data.matrix(ESR1_forHeatmapReady)
+ESR1_Matrix_Final<- t(ESR1_Matrix)
+ESR1_Breaks=seq(-1.5,1.5, length.out=31)
+pheatmap(ESR1_Matrix_Final,
+         color = colorRampPalette(c("#0092B3", "White", "#F09062"))(31),
+         breaks=ESR1_Breaks,
+         scale='none',# unscaled data
+         na.color="grey",
+         cluster_rows =F,
+         cluster_cols=F,
+         na_col="grey",
+         cellwidth=5, #Change tehe for size
+         cellheight=20, #change these for size
+         treeheight_row = 0,
+         fontsize_col = 4, 
+         main="ESR1")
+
+# Condensed ESR1 Heatmap
+ESR1_Heatmap_Condensed<- read.csv("/Volumes/paquette_a/slapehn/HTR8_Primary_MEHP_RNAseq_Comparison/TF_Files/ESR1_for_Heatmap_Condensed.csv")
+
+rownames(ESR1_Heatmap_Condensed) <- ESR1_Heatmap_Condensed$Gene
+ESR1_forHeatmapReady_Condensed <- ESR1_Heatmap_Condensed[,c(-1)] 
+
+ESR1_Matrix_Condensed<- data.matrix(ESR1_forHeatmapReady_Condensed)
+ESR1_Matrix_Final_Condensed<- t(ESR1_Matrix_Condensed)
+ESR1_Breaks=seq(-1.5,1.5, length.out=31)
+
+pheatmap(ESR1_Matrix_Final_Condensed,
+         color = colorRampPalette(c("#0092B3", "White", "#F09062"))(31),
+         breaks=ESR1_Breaks,
+         scale='none',# unscaled data
+         na.color="grey",
+         cluster_rows =F,
+         cluster_cols=F,
+         na_col="grey",
+         cellwidth=5, #Change tehe for size
+         cellheight=20, #change these for size
+         treeheight_row = 0,
+         fontsize_col = 4, 
+         main="ESR1")
+```
+## PPARD Heatmaps
+Including one full PPARD heatmap of all downstream DEGs and a second "condensed" heatmap with only DEGs that are found in at least two groups
+```{r PPARD Heatmaps, fig.width=10}
+# Full Heatmap for PPARD
+PPARD_Heatmap<- read.csv("/Volumes/paquette_a/slapehn/HTR8_Primary_MEHP_RNAseq_Comparison/TF_Files/PPARD_for_Heatmap.csv")
+
+rownames(PPARD_Heatmap) <- PPARD_Heatmap$Gene
+PPARD_forHeatmapReady <- PPARD_Heatmap[,c(-1)] 
+
+PPARD_Matrix<- data.matrix(PPARD_forHeatmapReady)
+PPARD_Matrix_Final<- t(PPARD_Matrix)
+PPARD_Breaks<-seq(-4, 4, length.out=31)
+
+pheatmap(PPARD_Matrix_Final,
+         color = colorRampPalette(c("#0092B3", "White", "#F09062"))(31),
+         breaks=PPARG_Breaks,
+         scale='none',# unscaled data
+         na.color="grey",
+         cluster_rows =F,
+         cluster_cols=F,
+         na_col="grey",
+         cellwidth=5, #Change tehe for size
+         cellheight=20, #change these for size
+         treeheight_row = 0,
+         fontsize_col = 4, 
+         main="PPARD")
+
+# Condensed Heatmap for PPARD
+PPARD_Heatmap_Condensed<- read.csv("/Volumes/paquette_a/slapehn/HTR8_Primary_MEHP_RNAseq_Comparison/TF_Files/PPARD_for_Heatmap_Condensed.csv")
+
+rownames(PPARD_Heatmap_Condensed) <- PPARD_Heatmap_Condensed$Gene
+PPARD_forHeatmapReady_Condensed <- PPARD_Heatmap_Condensed[,c(-1)] 
+
+PPARD_Matrix_Condensed<- data.matrix(PPARD_forHeatmapReady_Condensed)
+PPARD_Matrix_Final_Condensed<- t(PPARD_Matrix_Condensed)
+PPARD_Breaks<-seq(-4, 4, length.out=31)
+
+pheatmap(PPARD_Matrix_Final_Condensed,
+         color = colorRampPalette(c("#0092B3", "White", "#F09062"))(31),
+         breaks=PPARG_Breaks,
+         scale='none',# unscaled data
+         na.color="grey",
+         cluster_rows =F,
+         cluster_cols=F,
+         na_col="grey",
+         cellwidth=5, #Change tehe for size
+         cellheight=20, #change these for size
+         treeheight_row = 0,
+         fontsize_col = 4, 
+         main="PPARD")
+```
+
+## Pull in DEGs across Primary Cell Experiments
+```{r primary DEGs}
+Primary_Sig_1uM <- read.csv("/Volumes/paquette_a/slapehn/PrimaryTrophoblast_Phthalate_RNAseq/PrimaryTrophoblast_MEHP_RNAseq_Final/DEGs/Primary_Sig_MEHP_1uM.csv")
+Primary_Sig_90uM <- read.csv("/Volumes/paquette_a/slapehn/PrimaryTrophoblast_Phthalate_RNAseq/PrimaryTrophoblast_MEHP_RNAseq_Final/DEGs/Primary_Sig_MEHP_90uM.csv")
+Primary_Sig_180uM <- read.csv("/Volumes/paquette_a/slapehn/PrimaryTrophoblast_Phthalate_RNAseq/PrimaryTrophoblast_MEHP_RNAseq_Final/DEGs/Primary_Sig_MEHP_180uM.csv")
+
+Male_Sig_90uM <- read.csv("/Volumes/paquette_a/slapehn/PrimaryTrophoblast_Phthalate_RNAseq/Male_PrimaryTrophoblast_Final/DEGs/Male_Sig_MEHP_90uM.csv")
+Male_Sig_180uM <- read.csv("/Volumes/paquette_a/slapehn/PrimaryTrophoblast_Phthalate_RNAseq/Male_PrimaryTrophoblast_Final/DEGs/Male_Sig_MEHP_180uM.csv")
+
+Female_Sig_90uM <- read.csv("/Volumes/paquette_a/slapehn/PrimaryTrophoblast_Phthalate_RNAseq/Female_PrimaryTrophoblast_Final/DEGs/Female_Sig_MEHP_90uM.csv")
+Female_Sig_180uM <- read.csv("/Volumes/paquette_a/slapehn/PrimaryTrophoblast_Phthalate_RNAseq/Female_PrimaryTrophoblast_Final/DEGs/Female_Sig_MEHP_180uM.csv")
+```
+
+# Upset Plot of Primary and sex-stratified DEG overlap
+```{r Upset, echo=TRUE}
+#Step 1: Make Vectors
+
+A1<- as.vector(Primary_Sig_1uM$hgnc_id)
+A90<- as.vector(Primary_Sig_90uM$hgnc_id)
+A180<-as.vector(Primary_Sig_180uM$hgnc_id)
+M90<- as.vector(Male_Sig_90uM$hgnc_id)
+M180<-as.vector(Male_Sig_180uM$hgnc_id)
+F90<-as.vector(Female_Sig_90uM$hgnc_id)
+F180<-as.vector(Female_Sig_180uM$hgnc_id)
+
+#Step 2: Turn vectors into a list
+Upset_list<-list("All 1uM"=A1, "All 90uM"=A90, "All 180uM"=A180, "Male 90uM"=M90, "Male 180uM"=M180, "Female 90uM"=F90, "Female 180uM"=F180)
+
+#Step 3: Set Colors
+N=23
+ColorsMain <-rep("black",N) #black is all 
+ColorsMain[c(2,5,7, 11, 12, 14, 20)]<-"#04408C" #Male overlap with All (Dark Blue)
+ColorsMain[c(13, 21)]<-"Purple" #Female overlap with all (Purple) 
+ColorsMain[c(6, 9, 18)]<-"#5CA3FD" #Unique Male (Light Blue)
+ColorsMain[c(8, 17)]<-"#F996F9" #Unique Female (Light Pink)
+ColorsMain[c(10)] <- "Gold" #3 DEGs for all 90uM and 180uM groups
+
+#Step UpSet Plot
+upset(fromList(Upset_list), nsets=7, order.by="freq", main.bar.color=ColorsMain, text.scale=2)
+
+```
+
+#Find 90/180uM Primary Shared Genes
+```{r Gold Genes}
+Primary_90_180 <- inner_join(Primary_Sig_90uM, Primary_Sig_180uM, by=c("hgnc_symbol"), suffix=c("_P90", "P180"))
+
+Male_90_180 <- inner_join(Male_Sig_90uM, Male_Sig_180uM, by=c("hgnc_symbol"), suffix=c("_M90", "M180"))
+
+Female_90_180 <- inner_join(Female_Sig_90uM, Female_Sig_180uM, by=c("hgnc_symbol"), suffix=c("_F90", "_F180"))
+
+Male_Female_90_180 <- inner_join(Male_90_180, Female_90_180, by=c("hgnc_symbol"))
+
+Shared_Gold <- inner_join(Male_Female_90_180, Primary_90_180, by=c("hgnc_symbol"))
+print(Shared_Gold$hgnc_symbol)
+#Shared_Gold genes are the genes colored gold in the UpSet plot from the code chunk above
+```
+
+#Find list of unique male or female genes
+Identifying genes unique to males or females to complement upset plot
+```{r unique M/F genes}
+All_Male <- full_join(Male_Sig_90uM, Male_Sig_180uM, by=c("hgnc_symbol"))
+Maleonly_Step1 <- anti_join(All_Male, Female_Sig_90uM, by=c("hgnc_symbol"))
+Maleonly_Step2 <- anti_join(Maleonly_Step1, Primary_Sig_90uM, by=c("hgnc_symbol"))
+Maleonly_Step3 <-anti_join(Maleonly_Step2, Female_Sig_180uM, by=c("hgnc_symbol"))
+Maleonly_Step4 <-anti_join(Maleonly_Step3, Primary_Sig_180uM, by=c("hgnc_symbol"))
+Maleonly_Final <- anti_join(Maleonly_Step4, Primary_Sig_1uM, by=c("hgnc_symbol"))
+
+All_Female <- full_join(Female_Sig_90uM, Female_Sig_180uM, by=c("hgnc_symbol"))
+Femaleonly_Step1 <- anti_join(All_Female, Male_Sig_90uM, by=c("hgnc_symbol"))
+Femaleonly_Step2 <- anti_join(Femaleonly_Step1, Primary_Sig_90uM, by=c("hgnc_symbol"))
+Femaleonly_Step3 <-anti_join(Femaleonly_Step2, Male_Sig_180uM, by=c("hgnc_symbol"))
+Femaleonly_Step4 <-anti_join(Femaleonly_Step3, Primary_Sig_180uM, by=c("hgnc_symbol"))
+Femaleonly_Final <- anti_join(Femaleonly_Step4, Primary_Sig_1uM, by=c("hgnc_symbol"))
+
+```
+
+#Male/Female Combined Sex-stratified Bar plot
+Bar plot identifying the number of DEGs for each MEHP concentration across Male and Female results. 
+```{r Male/Female Combined Bar Graph, fig.width=3}
+
+Sex <- c("Female", "Female", "Female", "Female", "Male", "Male",  "Male", "Male")
+Concentration <- c("90uM MEHP", "90uM MEHP", "180uM MEHP", "180uM MEHP", "90uM MEHP", "90uM MEHP", "180uM MEHP", "180uM MEHP")
+Count <- c(19, 2, 7, 1, 45, 1, 109, 99)
+Direction <- c("Female Up", "Female Down", "Female Up", "Female Down","Male Up", "Male Down",  "Male Up", "Male Down")
+bardf<- data.frame(Count=Count, Concentration=Concentration, Direction=Direction, Sex=Sex)
+bardf$Concentration <- factor(bardf$Concentration, levels=c("90uM MEHP", "180uM MEHP"))
+
+bardf %>% ggplot(aes(x=Concentration, y=Count, fill=Direction)) + 
+  geom_bar(stat="identity", position="dodge") + 
+  theme_bw() + 
+  theme(axis.text = element_text(size=12), axis.title=element_text(size=16), plot.title=element_text(size=16), legend.text=element_text(size=12), legend.title=element_text(size=16)) + 
+  ggtitle("Sex-stratified Primary Cell- MEHP DEG Direction by Concentration") + 
+  geom_text(size=6, position=position_dodge(1), aes(label=Count)) + 
+  scale_fill_manual(values=c("Female Down"="#FCC3FC", "Female Up" ="#F996F9", "Male Down"="#A4CAFA", "Male Up"="#5CA3FD")) + 
+  ylim(0, 120) + 
+  ylab("Number of DEGs") 
+```
