@@ -1,0 +1,585 @@
+---
+title: "Primary_Trophoblast_MEHP_RNAseq_Final"
+author: "Samantha Lapehn"
+date: "03/29/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Final Analysis of Primary Trophoblast MEHP Samples
+
+This code performs filtering and normalization on primary trophoblast DMSO samples that were treated in the Paquette Lab and sequenced by Novogene. There are 23 samples total including 3 full male datasets of (1uM MEHP, 90uM MEHP, 180uM MEHP and DMSO) and 2 full and one partial (missing 1uM) female datasets.The full analysis will include N=8 for DMSO, 90uM, and 180uM and N=7 for 1uM.  
+
+## Load Packages
+```{r packages}
+library(edgeR)
+library(tidyverse)
+library(car)
+library(biomaRt)
+library(tximport)
+library(AnnotationHub)
+library(ChIPpeakAnno)
+library(org.Hs.eg.db)
+library(pathview)
+library(RColorBrewer)
+library(ggvenn)
+library(scales)
+```
+
+## Load Sample Information
+Load a .csv file including information on Sample IDs, treatment groups, and other relevant variables of interest
+```{r load data}
+SampleInfo<-read.csv("/Volumes/paquette_a/slapehn/PrimaryTrophoblast_Phthalate_RNAseq/PrimaryTrophoblast_MEHP_RNAseq_Final/SampleInfo_Final.csv")
+rownames(SampleInfo)<-SampleInfo$Novogene_ID
+```
+
+## Process RNA Sequencing Data 
+Perform an alignment of fastQ files performed with Kallisto and the hg38 human genome. 
+
+## Import Kallisto Files with TXimport
+```{r import prepare}
+dir<-"/Volumes/paquette_a/slapehn/PrimaryTrophoblast_Phthalate_RNAseq/Data/Kallisto"
+Files <- grep("output", list.files(dir),value=T)
+Names<- gsub("output_", "", Files)
+files <- file.path(dir, Files, "abundance.tsv")
+```
+
+
+## Import and Convert Transcript level data into gene level data using TX import
+Here, we are importing length scaled count data
+```{r Import Count Data}
+
+##Create Text to Gene File####
+hub <- AnnotationHub()
+edb <- hub[["AH60977"]]
+gnames<-keys(edb, keytype="TXID")
+head(gnames)
+
+tx2gene<-ensembldb::select(edb, keys = gnames, keytype = "TXID", columns = c("TXID","GENEID"))
+
+#Import in Count Data
+LengthScaledTPM <- tximport(files, type = "kallisto",ignoreTxVersion = T, tx2gene = tx2gene,countsFromAbundance = "lengthScaledTPM")
+LengthScaledTPM<-LengthScaledTPM$counts
+colnames(LengthScaledTPM)<-Names
+
+```
+
+##Create an annotation file that summarizes  what the genes are
+```{r Annotation File}
+
+mart <- useDataset("hsapiens_gene_ensembl", useMart("ensembl"))
+annot <- biomaRt::getBM(filters= "ensembl_gene_id", attributes=c("ensembl_gene_id","description","gene_biotype","hgnc_id","hgnc_symbol","entrezgene_id"), values=rownames(LengthScaledTPM), mart=mart)
+
+#Note: want different attributes? -use "listAttributes()" to see  what is  available
+#Pathway enrichment with KEGG  requires entrez IDs
+# Ensembl ids are more stable
+
+annot <-na.omit(annot )
+annot <-annot [!duplicated(annot$ensembl_gene_id),]
+rownames(annot )<-as.character(annot$ensembl_gene_id)
+
+```
+
+##Check:  Make sure sample info and gene names are aligned
+```{r Check}
+intersect(colnames(LengthScaledTPM),rownames(SampleInfo))
+
+SampleInfo<-SampleInfo[colnames(LengthScaledTPM),]
+
+rownames(SampleInfo)==colnames(LengthScaledTPM)
+```
+
+## Filter & Normalize data
+1. Clean up genes 
+2. Convert from Ensembl IDs to HGNC IDs
+3. Filter out low expressing genes
+4. Normalize data
+5. Create CPM Object (THIS IF FOR PLOTTTING)
+
+```{r Filter & Normalize}
+
+#Step 1. Remove Genes with Issues
+
+#remove all Ensembl IDs with the suffix "_PAR_Y"
+dim(LengthScaledTPM)
+LengthScaledTPM<-LengthScaledTPM[!grepl("_PAR_Y",rownames(LengthScaledTPM)),]
+annot<-annot[!grepl("_PAR_Y",annot$ensembl_gene_id),]
+
+#get rownames of count dataset to match annot$ENSEMBL by removing the "." and 
+# everything after it
+dim(LengthScaledTPM)
+rownames(LengthScaledTPM)<-gsub("\\..*","",rownames(LengthScaledTPM))
+dim(LengthScaledTPM)
+
+# Make Everything match the annotation file
+LengthScaledTPM<-LengthScaledTPM[annot$ensembl_gene_id,]
+
+
+#Step 2.  Remove all genes that do  not make sense to look at using "gene biotypes"
+table(annot$gene_biotype)
+
+BiotypesToKeep<-c("protein_coding", "lncRNA")
+
+GenesToKeep<-NA
+for(i in 1:length(BiotypesToKeep)){
+  GenesToKeep=c(GenesToKeep,annot[which(annot$gene_biotype==BiotypesToKeep[i]),"ensembl_gene_id"])
+}
+
+GenesToKeep<-na.omit(GenesToKeep)
+
+annot<-annot[which(annot$ensembl_gene_id%in%GenesToKeep),]
+annot<-annot[-which(annot$hgnc_id==""),]
+
+
+dim(LengthScaledTPM)
+LengthScaledTPM<-LengthScaledTPM[annot$ensembl_gene_id,]
+dim(LengthScaledTPM)
+
+rownames(LengthScaledTPM)<-make.names(annot$hgnc_symbol, unique=TRUE)
+
+## Create an edgeR object with Length Scaled TPM data
+y<-LengthScaledTPM
+y <- DGEList(y,genes=annot)
+
+#Step 3:Perform Gene Filtering: 
+
+#filter based on low expression
+logcpm<-cpm(y$counts,log=T)
+keep<-rowMeans(logcpm)>0 
+y_Filtered <- y[keep, ]
+
+dim(y)
+dim(y_Filtered)
+
+
+# Density plot before and after-make sure you are removing the first "peak" of low expressing genes 
+cpm<-cpm(y$counts,log=T)
+plot(density(cpm),main="Before Filtering")#,xlim=c(-10,20000))
+abline(v =0, col = "red", lty = 2)
+
+cpm<-cpm(y_Filtered$counts,log=T)
+plot(density(cpm),main="After Filtering")#,xlim=c(-10,20000))
+abline(v =0, col = "red", lty = 2)
+
+#Step 4: Calculate Normalization Factors 
+y_Final  <- calcNormFactors(y_Filtered,method="TMM") # This is the default
+
+#Plot to make sure everything is normalized
+par(mfrow=c(1,3))
+
+cpm<-cpm(y$counts,log=T)
+boxplot.matrix((cpm),ylim=c(-10,15),notch=T,main="CPM: Before Filtering")
+
+cpm<-cpm(y_Filtered$counts,log=T)
+boxplot.matrix((cpm),ylim=c(-10,15),notch=T,main="CPM: After Filtering 1")
+
+#Step 5: Create LogCPM object, NOTE:  This log CPM object doesnt go into edgeR, this is for plotting
+LogCPM<-cpm(y_Final$counts,log=T)
+boxplot.matrix((LogCPM),ylim=c(-10,15),notch=T,main="CPM: After TMM Norm")
+```
+
+## Quality Control Step: PCA Plot
+Shows what variability in the data is related to.
+```{r Principal Components}
+PCobj =prcomp(t(LogCPM), scale=TRUE)
+PCs = PCobj$x
+PCs =as.data.frame(PCs[,1:4])
+colnames(PCs)<-c("PC1","PC2","PC3","PC4")
+
+
+SampleInfo<-merge(SampleInfo,PCs,by='row.names')
+rownames(SampleInfo)<-SampleInfo[,1]
+SampleInfo<-SampleInfo[,-1]
+
+EVAL<-as.data.frame(matrix(NA,nrow=4,ncol=4))
+colnames(EVAL)<-c("P_Dose","P_Sex", "P_RIN", "P_PlacentaID") 
+for (i in 1:4){
+  AOV<-aov(PCs[,i]~Dose,data=SampleInfo)
+  EVAL[i,1] <-summary(AOV)[[1]][["Pr(>F)"]][1]
+}
+
+for (i in 1:4){
+  AOV<-aov(PCs[,i]~Sex,data=SampleInfo)
+  EVAL[i,2] <-summary(AOV)[[1]][["Pr(>F)"]][1]
+}
+
+for (i in 1:4){
+  AOV<-aov(PCs[,i]~RIN,data=SampleInfo)
+  EVAL[i,3] <-summary(AOV)[[1]][["Pr(>F)"]][1]
+}
+
+for (i in 1:4){
+  AOV<-aov(PCs[,i]~Placenta_ID,data=SampleInfo)
+  EVAL[i,4] <-summary(AOV)[[1]][["Pr(>F)"]][1]
+}
+EVAL$PropVar = summary(PCobj)$importance["Proportion of Variance", 1:4]
+
+print(EVAL)
+
+Colors<-as.character(SampleInfo$Dose)
+Colors<-car::recode(Colors,"'DMSO'='#65AB7E';'1uM'='#A5EDF7';'90uM'='#1786EF'; '180uM'='#070C6D'")
+Shape<-as.character(SampleInfo$Placenta_ID)
+Shape<-car::recode(Shape, "'19_15'='16'; '19_78'='15'; '21_20'='17'; '21_03'='0'; '21_04'='1'; '21_28'='2'")
+
+plot(PCs$PC1,PCs$PC2,col=Colors,pch=Shape,xlab="PC1",ylab="PC2")
+plot(PCs$PC3,PCs$PC4,col=Colors,pch=Shape,xlab="PC3",ylab="PC4")
+#Colors= DMSO-Green, Blue (light to dark)- MEHP 1uM, 90uM, 180uM
+#Shapes= categorized by Placental sample ID, Female are filled in shapes, male are outlined shapes
+```
+
+## Save Data:
+Save normalized data
+```{r Save Data}
+save(y_Final,LogCPM,annot,file="/Volumes/paquette_a/slapehn/PrimaryTrophoblast_Phthalate_RNAseq/PrimaryTrophoblast_MEHP_RNAseq_Final/NormalizedData_PrimaryTrophoblast_MEHP_Final.Rdata")
+```
+
+##  Calculate Differential Gene expressing generalized Linear models in EdgeR 
+1. Dispersion Parameters
+2. Generalized quasi-likelihood linear model (glmQL)
+3. F-test
+4. Pull Results
+5. Pull DEGs
+```{r EdgeR}
+
+#Pre-Step: Make a design matrix with variables of interest. Using a no-intercept design matrix here to allow for different comparison groups based on treatment batch. Otherwise can remove the  + 0 from model matrix equation
+
+sex<- factor(SampleInfo$Sex, levels=c("Male", "Female"))
+dose<- factor(SampleInfo$Dose, levels=c("DMSO", "1uM", "90uM", "180uM"))
+Placenta_ID <- factor(SampleInfo$Placenta_ID)
+RIN<- SampleInfo$RIN
+design <- model.matrix(~dose+ RIN + Placenta_ID + 0)
+design
+
+#Step 1: Estimate Dispersion: Maximizes the negative binomial likelihood to give the estimate of the common, trended and tagwise dispersions across all tags
+y_model <- estimateDisp(y_Final,design)
+plotBCV(y_model)
+
+#Step 2: glmQLFIT: Fitting a linear regression model to the read counts to each gene, conducting a genewise statistical test
+fit <- glmQLFit(y_model,design, robust=TRUE)
+
+#Step 3: Setup contrasts
+contrast1uM <- makeContrasts(dose1uM-doseDMSO, levels=design)
+contrast90uM<- makeContrasts(dose90uM-doseDMSO, levels=design)
+contrast180uM <- makeContrasts(dose180uM-doseDMSO, levels=design)
+
+#Step 4: Perform the F-Test (Including two examples, but only need to use one based on design matrix setup)
+MEHP1<- glmQLFTest(fit, contrast=contrast1uM) 
+MEHP90<- glmQLFTest(fit, contrast=contrast90uM)
+MEHP180<- glmQLFTest(fit, contrast=contrast180uM)
+#Step 5: Pull All Results
+AllResults_MEHP_1uM <-topTags(MEHP1,adjust.method="fdr",n=dim(LogCPM)[1])$table 
+AllResults_MEHP_90uM <-topTags(MEHP90,adjust.method="fdr",n=dim(LogCPM)[1])$table
+AllResults_MEHP_180uM <-topTags(MEHP180,adjust.method="fdr",n=dim(LogCPM)[1])$table
+#Step 6: Pull DEGs
+Sig_MEHP_1uM <-topTags(MEHP1,adjust.method="BH",n=dim(LogCPM)[1],p.value=0.05)$table  #BH adjust.method produces FDR values
+nrow(Sig_MEHP_1uM)
+print(Sig_MEHP_1uM$hgnc_symbol)
+Sig_MEHP_90uM <-topTags(MEHP90,adjust.method="BH",n=dim(LogCPM)[1],p.value=0.05)$table  
+nrow(Sig_MEHP_90uM)
+Sig_MEHP_180uM <-topTags(MEHP180,adjust.method="BH",n=dim(LogCPM)[1],p.value=0.05)$table  
+nrow(Sig_MEHP_180uM)
+
+```
+
+## Visualize DEGs on Volcano Plots
+Only making Volcano plots for 90uM and 180uM MEHP since 1uM MEHP only had a single DEG.
+```{r Volcano Plots}
+# Function to make volcano plots Make Volcano Plots
+
+#results are the all results object, title is what you want
+
+MakeVPlot<-function(Results,Title){
+sig<-subset(Results,FDR<0.05)
+sig<-sig[order(sig$FDR),]
+sig_top<-sig[1:30,]
+
+sig_up<-subset(sig,logFC>0)
+sig_up_top<-subset(sig_top,logFC>0)
+
+
+sig_down<-subset(sig,logFC<0)
+sig_down_top<-subset(sig_top,logFC<(0))
+
+
+ColorPalette<-brewer.pal(11,"RdBu")
+ColorPalette<-ColorPalette[c(2:4,8:10)]
+
+
+
+plot(Results$logFC,-log(Results$PValue),ylim=c(0,50),pch=20,cex=0.35,main=Title,ylab="Log P Value",xlab="logFC",col="grey60")
+abline(v=c(-2,2),lwd=1,lty=2,col="grey50")
+points(sig_up$logFC,-log(sig_up$PValue),pch=20,cex=0.75,col=ColorPalette[3])
+text(sig_up_top$logFC,-log(sig_up_top$PValue),rownames(sig_up_top),cex=0.75,col=ColorPalette[1],pos=1)
+
+points(sig_down$logFC,-log(sig_down$PValue),pch=20,cex=0.75,col=ColorPalette[4])
+text(sig_down_top$logFC,-log(sig_down_top$PValue),rownames(sig_down_top),cex=0.75,col=ColorPalette[6],pos=1)
+}
+
+MakeVPlot(AllResults_MEHP_90uM,"DEGs: 90uM MEHP")  
+MakeVPlot(AllResults_MEHP_180uM,"DEGs: 180uM MEHP")
+
+
+```
+
+##Visualize DEG Directionality across dose groups
+```{r DEG Directionality}
+Sig_MEHP_180uM_Up <- Sig_MEHP_180uM %>% 
+  dplyr::filter(logFC>0)
+Sig_MEHP_90uM_Up <- Sig_MEHP_90uM %>% 
+  dplyr::filter(logFC>0)
+Sig_MEHP_1uM_Up <- Sig_MEHP_1uM %>% 
+  dplyr::filter(logFC>0)
+
+Count <- c(1, 0, 129, 107, 167, 305)
+Concentration <- c("1uM MEHP", "1uM MEHP", "90uM MEHP", "90uM MEHP", "180uM MEHP", "180uM MEHP")
+Direction <- c("Up", "Down", "Up", "Down", "Up", "Down")
+bardf<- data.frame(Count=Count, Concentration=Concentration, Direction=Direction)
+bardf$Concentration <- factor(bardf$Concentration, levels=c("1uM MEHP", "90uM MEHP", "180uM MEHP"))
+
+bardf %>% ggplot(aes(x=Concentration, y=Count, fill=Direction)) + 
+  geom_bar(stat="identity", position="dodge") + 
+  theme_bw() + 
+  theme(axis.text=element_text(size = 12), axis.title=element_text(size=16), plot.title=element_text(size=18), legend.text=element_text(size=12), legend.title=element_text(size=16)) + 
+  ggtitle("Primary Cell-MEHP DEG Direction by Concentration") + 
+  geom_text(size=6, position=position_dodge(1), aes(label=Count)) + 
+  scale_fill_manual(values=c("#0092B3", "#F09062")) + 
+  ylim(0, 350) + 
+  ylab("Number of DEGs")
+```
+
+##Overlap across Doses/Treatments and Concordance Plotting
+Only looking for concordance and overlap for 90uM and 180uM since there is only one DEG for 1uM MEHP.
+```{r overlap}
+#Overlap of dose groups
+MEHP_90_and_180 <- inner_join(Sig_MEHP_90uM, Sig_MEHP_180uM, by=c("ensembl_gene_id"), suffix=c("_90", "_180"))
+nrow(MEHP_90_and_180)
+
+# Plot concordance of overlapping genes
+MEHP_90_and_180 %>% 
+  ggplot(aes(logFC_90, logFC_180)) + 
+  geom_point() + 
+  ggtitle("MEHP 90uM and 180uM Concordance") + 
+  xlab("logFC 90uM") + 
+  ylab("logFC 180uM") 
+```
+
+## Venn Diagrams of Overlap
+Venn Diagrams of Significance Overlap across dose groups 
+```{r venn diagram}
+#Venn Diagrams for each Dose Group
+VDList_AllMEHP <- list("MEHP 1uM"=Sig_MEHP_1uM$ensembl_gene_id, "MEHP 90uM"=Sig_MEHP_90uM$ensembl_gene_id, "MEHP 180uM"=Sig_MEHP_180uM$ensembl_gene_id)
+ggvenn(VDList_AllMEHP, fill_color=c("#0092B3", "#F09062", "#A1A3A6"), text_size=3)
+```
+
+
+## lncRNA Sig Results
+Identifying number/identity of lncRNA DEGS. The only DEG at 1uM MEHP is a protein coding gene. 
+```{r lncRNA DEGs}
+Sig_MEHP_180uM_lncRNA <- Sig_MEHP_180uM %>%
+  dplyr::filter(gene_biotype=="lncRNA")
+nrow(Sig_MEHP_180uM_lncRNA)
+Sig_MEHP_90uM_lncRNA <- Sig_MEHP_90uM %>%
+  dplyr::filter(gene_biotype=="lncRNA")
+nrow(Sig_MEHP_90uM_lncRNA)
+```
+
+
+##Plot some of the top DEGs to make sure our high results make sense
+Plotting the top 10 shared genes between MEHP 90uM and MEHP 180uM.None of these ten genes were significant for MEHP 1uM.
+```{r Plot top DEGs}
+
+ColorPal<-brewer.pal(8,"Dark2")
+
+#Put samples in logical order
+SampleInfo$Dose <- factor(SampleInfo$Dose, levels=c("DMSO", "1uM", "90uM", "180uM"))
+
+PlotGenes<-function(LogCPM,SampleInfo,GOI){
+tmp<-LogCPM[GOI,]
+boxplot(tmp~SampleInfo$Dose,ylim=c(0,10),vertical=T,ylab="Normalized Expression",
+        main=GOI,border=ColorPal,col="white", par(cex.axis=0.6))
+stripchart(tmp~SampleInfo$Dose,pch=20,cex=2,vertical=T,method="jitter",add=T,col=ColorPal)
+}
+#Plotting the 10 shared significant genes between 90uM and 180uM MEHP
+par(mfrow=c(2,5))
+PlotGenes(LogCPM,SampleInfo,"PDK4") 
+PlotGenes(LogCPM,SampleInfo,"PLIN2") 
+
+PlotGenes(LogCPM,SampleInfo,"CPT1A")
+PlotGenes(LogCPM,SampleInfo,"HPGD")
+
+PlotGenes(LogCPM,SampleInfo,"MMP19")
+PlotGenes(LogCPM,SampleInfo,"SOWAHC")
+
+PlotGenes(LogCPM,SampleInfo,"STRIP2")
+PlotGenes(LogCPM,SampleInfo,"TLE6")
+
+PlotGenes(LogCPM,SampleInfo,"FABP4")
+PlotGenes(LogCPM,SampleInfo,"HMGCS2")
+```
+
+## Pathway Analysis using Fry 
+Performing rotational gene set testing with Fry for MEHP 1uM, 90uM, and 180uM. Removing KEGG disease pathways prior to pathway analysis to reduce the number of comparisons and increase relevance of results.
+```{r Fry Pathway Analysis}
+#Prepare Kegg Database
+keggs <- getGeneKEGGLinks()
+keggnum <- as.numeric(gsub("path:hsa", "", keggs[,2]))
+kegg_dontwant <- c(4932, 4931, 4933, 4934, 4936, 4940, 4950, 4930,4949,4959,1501:1503, 1521:1524)
+rmind <- keggnum %in% kegg_dontwant | keggnum > 5000
+keggs <- keggs[!rmind,]
+keggs$SYMBOL <- mapIds(org.Hs.eg.db, keggs[,1], "SYMBOL", "ENTREZID")
+kegglst <- split(keggs$SYMBOL, keggs$PathwayID)
+keggmapper <- read.table("http://rest.kegg.jp/list/pathway/hsa/", sep = "\t", quote = "\"", fill = TRUE, comment.char = "")
+keggmapper[,2] <- sapply(strsplit(keggmapper[,2], " - "), function(x) gsub(" ", "_", paste(x[-length(x)], collapse = " ")))
+keggmapper <- setNames(keggmapper[,2], keggmapper[,1])
+names(kegglst) <- keggmapper[names(kegglst)]
+
+#Run Fry with Entrez Gene IDs
+kegglst_MEHP_1 <- lapply(kegglst, function(x) which(AllResults_MEHP_1uM[,5] %in% x))
+kegglst_MEHP_1 <- kegglst_MEHP_1[sapply(kegglst_MEHP_1, length) > 0L]
+
+kegglst_MEHP_90 <- lapply(kegglst, function(x) which(AllResults_MEHP_90uM[,5] %in% x))
+kegglst_MEHP_90 <- kegglst_MEHP_90[sapply(kegglst_MEHP_90, length) > 0L]
+
+kegglst_MEHP_180 <- lapply(kegglst, function(x) which(AllResults_MEHP_180uM[,5] %in% x))
+kegglst_MEHP_180 <- kegglst_MEHP_180[sapply(kegglst_MEHP_180, length) > 0L]
+
+fry_MEHP_1 <- fry(estimateDisp(y_Final, design), kegglst_MEHP_1, design, contrast=contrast1uM)
+
+fry_MEHP_90 <- fry(estimateDisp(y_Final, design), kegglst_MEHP_90, design, constrast=contrast90uM)
+
+fry_MEHP_180 <-fry(estimateDisp(y_Final, design), kegglst_MEHP_180, design, contrast=contrast180uM)
+
+#Pull Fry Significant Fry Results
+Fry_FDR_MEHP_1 <- fry_MEHP_1 %>%
+  dplyr::filter(FDR<0.05) %>%
+  arrange(FDR)
+Fry_FDR_MEHP_1$ID <- rownames(Fry_FDR_MEHP_1)
+
+Fry_FDR_MEHP_90 <- fry_MEHP_90 %>%
+  dplyr::filter(FDR<0.05) %>%
+  arrange(FDR)
+Fry_FDR_MEHP_90$ID <- rownames(Fry_FDR_MEHP_90)
+
+Fry_FDR_MEHP_180 <- fry_MEHP_180 %>%
+  dplyr::filter(FDR<0.05) %>%
+  arrange(FDR)
+Fry_FDR_MEHP_180$ID <- rownames(Fry_FDR_MEHP_180)
+
+#Find Shared Pathways Across Dose Groups
+# Look for common significant pathways and add sum(FDR)
+Fry_FDR_Combined_MEHP_90_180 <- inner_join(Fry_FDR_MEHP_90, Fry_FDR_MEHP_180, by=c("ID"), suffix=c("_90", "_180")) %>%
+  mutate(sum_FDR_90_180= FDR_90 + FDR_180) %>%
+  arrange(sum_FDR_90_180)
+
+#Top 10 Pathways for each Group
+#top 10 MEHP 1
+head(Fry_FDR_MEHP_1$ID, 10)
+#top 10 MEHP 90
+nrow(Fry_FDR_MEHP_90)
+head(Fry_FDR_MEHP_90$ID, 10)
+#Top 10 MEHP 180
+nrow(Fry_FDR_MEHP_180)
+head(Fry_FDR_MEHP_180$ID, 10)
+#Shared Pathways MEHP 90uM and 180uM
+nrow(Fry_FDR_Combined_MEHP_90_180)
+head(Fry_FDR_Combined_MEHP_90_180$ID, 10)
+
+```
+
+#Compare results to CANDLE EHP Findings
+Comparing DEGs to MEHP DEGs from Paquette et al. human placental transcriptome and phthalates from the CANDLE cohort.No Overlapping DEGs were identified.
+```{r Compare to CANDLE EHP Findings}
+
+Sig_CANDLE_All <- read.csv("/Volumes/paquette_a/slapehn/ECHOPathwaysPhthalateAnalysis/SignificantFindingsEHP.csv")
+
+Sig_CANDLE_MEHP <- Sig_CANDLE_All %>%
+  dplyr::filter(Phthalate=="MEHP")
+
+#Make Union of All Sig Genes for MEHP
+Sig_MEHP_90_180 <- full_join(Sig_MEHP_90uM, Sig_MEHP_180uM, by=c("hgnc_symbol"), suffix=c("_90", "_180"))
+Sig_All_MEHP <- full_join(Sig_MEHP_90_180, Sig_MEHP_1uM, by=c("hgnc_symbol"), suffix=c("_", "_1"))
+
+#Compare CANDLE MEHP DEGs with Primary Trophoblast MEHP DEGs:
+
+Sig_CANDLE_Primary_MEHP <- inner_join(Sig_CANDLE_MEHP, Sig_All_MEHP, by=c("Gene"="hgnc_symbol"), suffix=c("_CANDLE", "_HTR8"))
+nrow(Sig_CANDLE_Primary_MEHP) #No overlapping DEGs
+```
+
+## KEGG Bubble Plots
+Export and rearrange the pathways to make a bubble plot for pathway visualization.
+```{r Bubble Plot, fig.height=4.5, fig.width=6}
+#Export significant KEGG pathways 
+write.csv(Fry_FDR_MEHP_90, "/Volumes/paquette_a/slapehn/PrimaryTrophoblast_Phthalate_RNAseq/PrimaryTrophoblast_MEHP_RNAseq_Final/Pathway_Files/PrimaryTrophoblast_Sig_Fry_MEHP_90uM.csv")
+
+write.csv(Fry_FDR_MEHP_180, "/Volumes/paquette_a/slapehn/PrimaryTrophoblast_Phthalate_RNAseq/PrimaryTrophoblast_MEHP_RNAseq_Final/Pathway_Files/PrimaryTrophoblast_Sig_Fry_MEHP_180uM.csv")
+
+#Read back in pathways rearranged/combined for bubble plot pathway visualization
+All_Sig_KEGG <- read.csv("/Volumes/paquette_a/slapehn/PrimaryTrophoblast_Phthalate_RNAseq/PrimaryTrophoblast_MEHP_RNAseq_Final/Pathway_Files/Primary_Pathway_Bubble.csv")
+
+All_Sig_KEGG$Concentration <- factor(All_Sig_KEGG$Concentration, levels=c("90uM MEHP", "180uM MEHP"))
+All_Sig_KEGG$Pathway<- factor(All_Sig_KEGG$Pathway)
+All_Sig_KEGG$Pathway <- reorder(All_Sig_KEGG$Pathway, All_Sig_KEGG$Sort)
+All_Sig_KEGG$KEGG.Category <- factor(All_Sig_KEGG$KEGG.Category)
+
+ggplot(All_Sig_KEGG, aes(x=Concentration, y=Pathway, color=Direction)) + 
+  geom_point(aes(size = -log10(FDR))) +
+  theme_bw() + 
+  ggtitle("Primary Cell- KEGG Pathways") + 
+  scale_color_manual(values=c("Up"="#F09062", "Down"="#0092B3"))+
+  theme(plot.title=element_text(size=10), axis.text.y=element_text(size=10), axis.title=element_text(size=12)) + 
+   scale_x_discrete(labels=wrap_format(4)) 
+```
+
+## TF Bubble Plot
+Creating bubble plot visualization of significant TFs identified through Enrichr analysis with Encode + ChEA consensus TF library. Reading in a rearranged file of the significant TFs for MEHP 90uM and 180uM. No significant TFs for MEHP 1uM. 
+```{r TF Bubble, fig.width=3}
+PrimaryTF <- read.csv("/Volumes/paquette_a/slapehn/PrimaryTrophoblast_Phthalate_RNAseq/PrimaryTrophoblast_MEHP_RNAseq_Final/TF_Files/TF_BubblePlot/PrimaryTF_Bubble.csv")
+PrimaryTF$Group <- factor(PrimaryTF$Group, levels=c("90uM MEHP", "180uM MEHP"))
+ggplot(PrimaryTF, aes(x=Group, y=TF, color=-log10(Adjusted_P))) + 
+  geom_point(aes(size = Percent_Targets)) +
+  theme_bw() + 
+  ggtitle("Primary Cell-Transcription Factor Enrichment") + 
+  theme(plot.title=element_text(size=14), axis.text.x=element_text(size=12))  +
+  scale_x_discrete(labels=wrap_format(10))
+
+```
+
+#Targeted TF- Gene Search
+Uploading DEG lists associated with TFs of interest from Enrichr analysis (https://maayanlab.cloud/Enrichr/) in order to match with logFC.
+```{r TF Gene Search}
+#Step 1: Load Gene of Interest Lists
+PPARG_180uM <- read.csv("/Volumes/paquette_a/slapehn/PrimaryTrophoblast_Phthalate_RNAseq/PrimaryTrophoblast_MEHP_RNAseq_Final/TF_Files/Targeted_TF_Genes/PPARG_Primary_180.csv")
+PPARD_180uM <- read.csv("/Volumes/paquette_a/slapehn/PrimaryTrophoblast_Phthalate_RNAseq/PrimaryTrophoblast_MEHP_RNAseq_Final/TF_Files/Targeted_TF_Genes/PPARD_Primary_180.csv")
+AR_180uM <- read.csv("/Volumes/paquette_a/slapehn/PrimaryTrophoblast_Phthalate_RNAseq/PrimaryTrophoblast_MEHP_RNAseq_Final/TF_Files/Targeted_TF_Genes/AR_Primary_180.csv")
+ESR1_180uM <- read.csv("/Volumes/paquette_a/slapehn/PrimaryTrophoblast_Phthalate_RNAseq/PrimaryTrophoblast_MEHP_RNAseq_Final/TF_Files/Targeted_TF_Genes/ESR1_Primary_180.csv")
+
+PPARG_90uM <- read.csv("/Volumes/paquette_a/slapehn/PrimaryTrophoblast_Phthalate_RNAseq/PrimaryTrophoblast_MEHP_RNAseq_Final/TF_Files/Targeted_TF_Genes/PPARG_Primary_90.csv")
+PPARD_90uM <- read.csv("/Volumes/paquette_a/slapehn/PrimaryTrophoblast_Phthalate_RNAseq/PrimaryTrophoblast_MEHP_RNAseq_Final/TF_Files/Targeted_TF_Genes/PPARD_Primary_90.csv")
+
+#Step 2: Inner join gene lists with Sig Genes and filter to include only Gene, LogFC, FDR
+PPARG_180uM_Primary <- inner_join(PPARG_180uM, Sig_MEHP_180uM, by=c("Gene"="hgnc_symbol")) %>%
+  dplyr::select("Gene", "logFC", "FDR")
+PPARD_180uM_Primary <- inner_join(PPARD_180uM, Sig_MEHP_180uM, by=c("Gene"="hgnc_symbol")) %>%
+  dplyr::select("Gene", "logFC", "FDR")
+AR_180uM_Primary <- inner_join(AR_180uM, Sig_MEHP_180uM, by=c("Gene"="hgnc_symbol")) %>%
+  dplyr::select("Gene", "logFC", "FDR")
+ESR1_180uM_Primary <- inner_join(ESR1_180uM, Sig_MEHP_180uM, by=c("Gene"="hgnc_symbol")) %>%
+  dplyr::select("Gene", "logFC", "FDR")
+
+PPARG_90uM_Primary <- inner_join(PPARG_90uM, Sig_MEHP_90uM, by=c("Gene"="hgnc_symbol")) %>%
+  dplyr::select("Gene", "logFC", "FDR")
+PPARD_90uM_Primary <- inner_join(PPARD_90uM, Sig_MEHP_90uM, by=c("Gene"="hgnc_symbol")) %>%
+  dplyr::select("Gene", "logFC", "FDR")
+
+#Step 3: Write CSV files
+write.csv(PPARG_180uM_Primary, "/Volumes/paquette_a/slapehn/PrimaryTrophoblast_Phthalate_RNAseq/PrimaryTrophoblast_MEHP_RNAseq_Final/TF_Files/Targeted_TF_forHeatmap/PPARG_180uM_Primary.csv")
+write.csv(PPARD_180uM_Primary, "/Volumes/paquette_a/slapehn/PrimaryTrophoblast_Phthalate_RNAseq/PrimaryTrophoblast_MEHP_RNAseq_Final/TF_Files/Targeted_TF_forHeatmap/PPARD_180uM_Primary.csv")
+write.csv(AR_180uM_Primary, "/Volumes/paquette_a/slapehn/PrimaryTrophoblast_Phthalate_RNAseq/PrimaryTrophoblast_MEHP_RNAseq_Final/TF_Files/Targeted_TF_forHeatmap/AR_180uM_Primary.csv")
+write.csv(ESR1_180uM_Primary, "/Volumes/paquette_a/slapehn/PrimaryTrophoblast_Phthalate_RNAseq/PrimaryTrophoblast_MEHP_RNAseq_Final/TF_Files/Targeted_TF_forHeatmap/ESR1_180uM_Primary.csv")
+write.csv(PPARG_90uM_Primary, "/Volumes/paquette_a/slapehn/PrimaryTrophoblast_Phthalate_RNAseq/PrimaryTrophoblast_MEHP_RNAseq_Final/TF_Files/Targeted_TF_forHeatmap/PPARG_90uM_Primary.csv")
+write.csv(PPARD_90uM_Primary, "/Volumes/paquette_a/slapehn/PrimaryTrophoblast_Phthalate_RNAseq/PrimaryTrophoblast_MEHP_RNAseq_Final/TF_Files/Targeted_TF_forHeatmap/PPARD_90uM_Primary.csv")
+```
+
