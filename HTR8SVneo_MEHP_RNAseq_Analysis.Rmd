@@ -1,0 +1,618 @@
+---
+title: "HTR8_Phthalate_RNAseq Final"
+author: "Samantha Lapehn"
+date: "03/29/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load Packages
+```{r packages}
+library(edgeR)
+library(tidyverse)
+library(car)
+library(biomaRt)
+library(tximport)
+library(RColorBrewer)
+library(AnnotationHub)
+library(ggvenn)
+library(org.Hs.eg.db)
+library(pheatmap)
+library(pathview)
+```
+
+##  Load Data about How Experiment was Run
+
+```{r load data}
+SampleInfo<-read.csv("/Volumes/paquette_a/slapehn/Phthalate_RNAseq_CombinedAnalysis/Data/SampleInfo_PhthalateRNAseq_MEHP.csv")
+rownames(SampleInfo)<-SampleInfo$ID
+```
+
+## Process RNA Sequencing Data 
+Alignment of fastQ files performed using Kallisto and the hg38 human genome
+
+## Import Kallisto Files using TX Import
+
+```{r Import Kallisto Files}
+dir<-"/Volumes/paquette_a/slapehn/Phthalate_RNAseq_CombinedAnalysis/Data/MEHP_Kallisto/"
+Files <- grep("output", list.files(dir),value=T)
+Names<- gsub("output_", "", Files)
+files <- file.path(dir, Files, "abundance.tsv")
+```
+
+## Import and Convert Transcript level data into gene level data using TX import
+
+Here, we are importing length scaled count data
+```{r Import Count Data}
+
+##Create Text to Gene File####
+hub <- AnnotationHub()
+edb <- hub[["AH60977"]]
+gnames<-keys(edb, keytype="TXID")
+head(gnames)
+
+tx2gene<-ensembldb::select(edb, keys = gnames, keytype = "TXID", columns = c("TXID","GENEID"))
+
+
+#Import in Count Data
+LengthScaledTPM <- tximport(files, type = "kallisto",ignoreTxVersion = T, tx2gene = tx2gene,countsFromAbundance = "lengthScaledTPM")
+LengthScaledTPM<-LengthScaledTPM$counts
+colnames(LengthScaledTPM)<-Names
+
+```
+
+##Create an annotation file that summaries  what the genes are
+```{r Annotation File}
+
+mart <- useDataset("hsapiens_gene_ensembl", useMart("ensembl"))
+annot <- biomaRt::getBM(filters= "ensembl_gene_id", attributes=c("ensembl_gene_id","description","gene_biotype","hgnc_id","hgnc_symbol","entrezgene_id"), values=rownames(LengthScaledTPM), mart=mart)
+
+#Note: want different attributes? -use "listAttributes()" to see  what is  available
+#Pathway enrichment with KEGG  requires entrez IDs
+# Ensembl ids are more stable
+
+
+annot <-na.omit(annot )
+annot <-annot [!duplicated(annot$ensembl_gene_id),]
+rownames(annot )<-as.character(annot$ensembl_gene_id)
+```
+
+##Check:  Make sure sample info and gene names are aligned
+```{r Check}
+intersect(colnames(LengthScaledTPM),rownames(SampleInfo))
+
+SampleInfo<-SampleInfo[colnames(LengthScaledTPM),]
+
+rownames(SampleInfo)==colnames(LengthScaledTPM)
+```
+
+## Filter & Normalize data
+1. Clean up genes 
+2. Convert from Ensembl IDs to HGNC IDs
+3. Filter out low  expressing genes
+4. Normalize data
+5. Create CPM Object (THIS IF FOR PLOTTTING)
+
+```{r Filter & Normalize}
+
+#1. Remove Genes with Issues
+
+#remove all Ensembl IDs with the suffix "_PAR_Y"
+dim(LengthScaledTPM)
+LengthScaledTPM<-LengthScaledTPM[!grepl("_PAR_Y",rownames(LengthScaledTPM)),]
+annot<-annot[!grepl("_PAR_Y",annot$ensembl_gene_id),]
+
+#get rownames of count dataset to match annot$ENSEMBL by removing the "." and 
+# everything after it
+dim(LengthScaledTPM)
+rownames(LengthScaledTPM)<-gsub("\\..*","",rownames(LengthScaledTPM))
+dim(LengthScaledTPM)
+
+# Make Everything match the annotation file
+LengthScaledTPM<-LengthScaledTPM[annot$ensembl_gene_id,]
+#remove all gene types that are difficult to interpret
+
+#2.  Remove all genes that do  not make sense to look at using "gene biotypes"
+table(annot$gene_biotype)
+
+BiotypesToKeep<-c("protein_coding", "lncRNA")
+
+GenesToKeep<-NA
+for(i in 1:length(BiotypesToKeep)){
+  GenesToKeep=c(GenesToKeep,annot[which(annot$gene_biotype==BiotypesToKeep[i]),"ensembl_gene_id"])
+}
+
+GenesToKeep<-na.omit(GenesToKeep)
+
+annot<-annot[which(annot$ensembl_gene_id%in%GenesToKeep),]
+annot<-annot[-which(annot$ensembl_gene_id==""),]
+
+
+dim(LengthScaledTPM)
+LengthScaledTPM<-LengthScaledTPM[annot$ensembl_gene_id,]
+dim(LengthScaledTPM)
+
+rownames(LengthScaledTPM)<-make.names(annot$hgnc_symbol, unique=TRUE)
+
+
+## Create an edgeR object with Length Scaled TPM data
+y<-LengthScaledTPM
+y <- DGEList(y,genes=annot)
+
+rownames(y$counts)
+
+# Perform Gene Filtering: Make sure to hold treatment group as rep
+
+logcpm<-cpm(y$counts,log=T)
+keep<-rowMeans(logcpm)>0 
+y_Filtered<- y[keep, ]
+
+
+dim(y)
+dim(y_Filtered)
+
+# Density plot before and after-make sure you are removing the first "peak" of low expressing genes 
+cpm<-cpm(y$counts,log=T)
+plot(density(cpm),main="Before Filtering")#,xlim=c(-10,20000))
+abline(v =0, col = "red", lty = 2)
+
+cpm<-cpm(y_Filtered$counts,log=T)
+plot(density(cpm),main="After Filtering 1")#,xlim=c(-10,20000))
+abline(v =0, col = "red", lty = 2)
+
+
+#Step 4: Calculate Normalization Factors 
+y_Final  <- calcNormFactors(y_Filtered,method="TMM") # This is the default
+
+#Plot to make sure everything is normalized
+par(mfrow=c(1,3))
+
+cpm<-cpm(y$counts,log=T)
+boxplot.matrix((cpm),ylim=c(-10,15),notch=T,main="CPM: Before Filtering")
+
+cpm<-cpm(y_Filtered$counts,log=T)
+boxplot.matrix((cpm),ylim=c(-10,15),notch=T,main="CPM: After Filtering 1")
+
+
+#Step 5: Create LogCPM object, NOTE:  This log CPM object doesnt go into edgeR, this is for plotting
+LogCPM<-cpm(y_Final$counts,log=T)
+boxplot.matrix((LogCPM),ylim=c(-10,15),notch=T,main="CPM: After TMM Norm")
+```
+
+
+## Quality Control Step: PCA Plot
+Shows what variability  in the data is related to. The PCA plot shows DMSO in purple (light is Batch 1, dark is batch 2), MEHP in green with lighter colors being lower doses.
+```{r Principal Components}
+PCobj =prcomp(t(LogCPM), scale=TRUE)
+PCs = PCobj$x
+PCs =as.data.frame(PCs[,1:4])
+colnames(PCs)<-c("PC1","PC2","PC3","PC4")
+
+
+SampleInfo<-merge(SampleInfo,PCs,by='row.names')
+rownames(SampleInfo)<-SampleInfo[,1]
+SampleInfo<-SampleInfo[,-1]
+
+EVAL<-as.data.frame(matrix(NA,nrow=4,ncol=3))
+colnames(EVAL)<-c("P_Treat","P_RIN", "P_Batch")
+for (i in 1:4){
+  AOV<-aov(PCs[,i]~Treatment,data=SampleInfo)
+  EVAL[i,1] <-summary(AOV)[[1]][["Pr(>F)"]][1]
+}
+
+for (i in 1:4){
+  AOV<-aov(PCs[,i]~RIN,data=SampleInfo)
+  EVAL[i,2] <-summary(AOV)[[1]][["Pr(>F)"]][1]
+}
+
+for (i in 1:4){
+  AOV<-aov(PCs[,i]~Batch,data=SampleInfo)
+  EVAL[i,3] <-summary(AOV)[[1]][["Pr(>F)"]][1]
+}
+EVAL$PropVar = summary(PCobj)$importance["Proportion of Variance", 1:4]
+print(EVAL)
+
+Colors<-as.character(SampleInfo$Treatment)
+Colors<-car::recode(Colors,"'MEHP_90'='#18B608';'MEHP_180'='#166A25';'DMSO_1'='#C699EC'; 'DMSO_2'='#5E08A6'; 'MEHP_1'='#72FA07'")
+
+#MEHP=green, #MCIOP=blue #lighter is lower dose #DMSO=purple (light=b1, dark=b2)
+
+plot(PCs$PC1,PCs$PC2,col=Colors,pch=16,xlab="PC1",ylab="PC2")
+plot(PCs$PC3,PCs$PC4,col=Colors,pch=16,xlab="PC3",ylab="PC4")
+
+```
+
+## Save Data:
+```{r Save Data}
+save(y_Final,LogCPM,annot,file="/Volumes/paquette_a/slapehn/Phthalate_RNAseq_CombinedAnalysis/MEHP_HTR8_CPM/MEHP_HTR8_CPMCutoff.RData")
+```
+
+##  Calculate Differential Gene expressing generalized Linear models in EdgeR 
+1. Dispersion Parameters
+2. Generalized quasi-likelihood linear model (glmQL)
+3. F-test
+4. Pull Results
+5. Pull DEGs
+```{r Dispersion}
+
+#PreStep: Make design matrix
+group<-factor(SampleInfo$Treatment,levels=c("DMSO_1","DMSO_2", "MEHP_1", "MEHP_90","MEHP_180"))
+batch <- factor(SampleInfo$Batch, levels=c("1", "2"))
+design <- model.matrix(~group + 0)
+design
+
+
+#Step 1: Estimate Dispersion: Maximizes the negative binomial likelihood to give the estimate of the common, trended and tagwise dispersions across all tags
+y_model <- estimateDisp(y_Final,design)
+plotBCV(y_model)
+
+#Step 2: glmQLFIT: Fitting a linear regression model to the read counts to each gene, condcuting a genewise statistical test
+fit <- glmQLFit(y_model,design, robust=TRUE)
+
+#Step 3: Perform the F-Test
+#MEHP_90 and MEHP_180 are compared to Batch 1 DMSO. All others compared to Batch 2 DMSO.
+MEHP_1<- glmQLFTest(fit, contrast=c(0, -1, 1, 0, 0))
+MEHP_90<- glmQLFTest(fit,contrast=c(-1, 0, 0, 1, 0))
+MEHP_180 <-glmQLFTest(fit,contrast=c(-1, 0, 0, 0, 1))
+
+#Step 4: Pull All Results
+AllResults_MEHP_1 <-topTags(MEHP_1,adjust.method="fdr",n=dim(LogCPM)[1])$table
+AllResults_MEHP_90 <-topTags(MEHP_90,adjust.method="fdr",n=dim(LogCPM)[1])$table
+AllResults_MEHP_180 <-topTags(MEHP_180,adjust.method="fdr",n=dim(LogCPM)[1])$table
+
+#Step 5: Pull DEGs
+Sig_MEHP_1 <-topTags(MEHP_1,adjust.method="BH",n=dim(LogCPM)[1],p.value=0.05)$table
+nrow(Sig_MEHP_1)
+Sig_MEHP_90 <-topTags(MEHP_90,adjust.method="BH",n=dim(LogCPM)[1],p.value=0.05)$table
+nrow(Sig_MEHP_90)
+Sig_MEHP_180 <-topTags(MEHP_180,adjust.method="BH",n=dim(LogCPM)[1],p.value=0.05)$table
+nrow(Sig_MEHP_180)
+
+```
+
+## Visualize DEGs on Volcano Plots
+```{r Volcano Plots}
+# Function to make volcano plots Make Volcano Plots
+
+#results are the all results object, title is what you want
+
+MakeVPlot<-function(Results,Title){
+sig<-subset(Results,FDR<0.05)
+sig<-sig[order(sig$FDR),]
+sig_top<-sig[1:30,]
+
+sig_up<-subset(sig,logFC>0)
+sig_up_top<-subset(sig_top,logFC>0)
+
+
+sig_down<-subset(sig,logFC<0)
+sig_down_top<-subset(sig_top,logFC<(0))
+
+
+ColorPalette<-brewer.pal(11,"RdBu")
+ColorPalette<-ColorPalette[c(2:4,8:10)]
+
+
+
+plot(Results$logFC,-log(Results$PValue),ylim=c(0,50),pch=20,cex=0.35,main=Title,ylab="Log P Value",xlab="logFC",col="grey60")
+abline(v=c(-2,2),lwd=1,lty=2,col="grey50")
+points(sig_up$logFC,-log(sig_up$PValue),pch=20,cex=0.75,col=ColorPalette[3])
+text(sig_up_top$logFC,-log(sig_up_top$PValue),rownames(sig_up_top),cex=0.75,col=ColorPalette[1],pos=1)
+
+points(sig_down$logFC,-log(sig_down$PValue),pch=20,cex=0.75,col=ColorPalette[4])
+text(sig_down_top$logFC,-log(sig_down_top$PValue),rownames(sig_down_top),cex=0.75,col=ColorPalette[6],pos=1)
+}
+MakeVPlot(AllResults_MEHP_1,"DEG: 1uM MEHP")
+MakeVPlot(AllResults_MEHP_90,"DEGs: 90uM MEHP")
+MakeVPlot(AllResults_MEHP_180,"DEGs: 180uM MEHP")
+
+```
+
+##Visualize DEG Directionality across dose groups
+```{r DEG Directionality}
+Sig_MEHP_1_Up<- Sig_MEHP_1 %>%
+  dplyr::filter(logFC>0)
+
+Sig_MEHP_90_Up<- Sig_MEHP_90 %>%
+  dplyr::filter(logFC>0)
+
+Sig_MEHP_180_Up<- Sig_MEHP_180 %>%
+  dplyr::filter(logFC>0)
+
+Group <- c("1uM MEHP Up", "1uM MEHP Down", "90uM MEHP Up", "90uM MEHP Down", "180uM MEHP Up", "180uM MEHP Down")
+Count <- c(31, 3, 978, 628, 2060, 1834)
+Concentration <- c("1uM MEHP", "1uM MEHP", "90uM MEHP", "90uM MEHP", "180uM MEHP", "180uM MEHP")
+Direction <- c("Up", "Down", "Up", "Down","Up", "Down")
+bardf<- data.frame(Group=Group, Count=Count, Concentration=Concentration, Direction=Direction)
+
+bardf$Direction <- factor(bardf$Direction, levels=c("Down", "Up"))
+bardf$Concentration <- factor(bardf$Concentration, levels=c("1uM MEHP", "90uM MEHP", "180uM MEHP", "1uM MCIOP", "90uM MCIOP", "180uM MCIOP"))
+bardf$Group<- factor(bardf$Group, levels=c("1uM MEHP Up", "1uM MEHP Down", "90uM MEHP Up", "90uM MEHP Down", "180uM MEHP Up", "180uM MEHP Down"))
+
+
+bardf %>% ggplot(aes(x=Concentration, y=Count, fill=Direction)) + 
+  geom_bar(stat="identity", position="dodge") + 
+  theme_bw() + 
+  theme(axis.title=element_text(size=16), axis.text = element_text(size=12), plot.title=element_text(size=18), legend.text=element_text(size=12), legend.title=element_text(size=16)) + 
+  ggtitle("MEHP DEG Direction by Concentration") + 
+  geom_text(position=position_dodge(1), aes(label=Count)) + 
+  scale_fill_manual(values=c("#0092B3", "#F09062")) + 
+  ylab("Number of DEGs")
+
+```
+
+
+##Overlap across Doses/Treatments and Concordance Plotting
+```{r overlap}
+#Overlap of dose groups
+MEHP_1_and_90 <- inner_join(Sig_MEHP_1, Sig_MEHP_90, by=c("ensembl_gene_id"), suffix=c("_1", "_90"))
+nrow(MEHP_1_and_90)
+
+MEHP_1_and_180 <- inner_join(Sig_MEHP_1, Sig_MEHP_180, by=c("ensembl_gene_id"), suffix=c("_1", "_180"))
+nrow(MEHP_1_and_180)
+
+MEHP_90_and_180 <- inner_join(Sig_MEHP_90, Sig_MEHP_180, by=c("ensembl_gene_id"), suffix=c("_90", "_180"))
+nrow(MEHP_90_and_180)
+
+MEHP_Shared_Sig <- inner_join(MEHP_90_and_180, Sig_MEHP_1, by=("ensembl_gene_id"), suffix=c("_", "_1"))
+nrow(MEHP_Shared_Sig)
+
+#Plot Concordance within treatments across doses
+MEHP_1_and_90 %>% 
+  ggplot(aes(logFC_1, logFC_90)) + 
+  geom_point() + 
+  ggtitle("MEHP 1uM and 90uM Concordance")
+MEHP_1_and_180 %>% 
+  ggplot(aes(logFC_1, logFC_180)) + 
+  geom_point() + 
+  ggtitle("MEHP 1uM and 180uM Concordance")
+MEHP_90_and_180 %>% 
+  ggplot(aes(logFC_90, logFC_180)) + 
+  geom_point() + 
+  ggtitle("MEHP 90uM and 180uM Concordance")
+
+```
+
+## Venn Diagrams of Overlap
+Venn Diagrams of Significance Overlap across dose groups.
+```{r venn diagram}
+
+#Venn Diagrams for MEHP and MCIOP
+VDList_MEHP <- list("MEHP 1uM"=Sig_MEHP_1$ensembl_gene_id, "MEHP 90uM"=Sig_MEHP_90$ensembl_gene_id, "MEHP 180uM"=Sig_MEHP_180$ensembl_gene_id)
+ggvenn(VDList_MEHP, fill_color=c("#0092B3", "#F09062", "#A1A3A6"), text_size=3)
+
+```
+
+##Union of All Sig Genes
+Create a dataframe containing all significant genes. 
+```{r union of all sig genes}
+
+Sig_MEHP_90_180 <- full_join(Sig_MEHP_90, Sig_MEHP_180, by=c("hgnc_symbol"), suffix=c("_90", "_180"))
+Sig_All_MEHP <- full_join(Sig_MEHP_90_180, Sig_MEHP_1, by=c("hgnc_symbol"), suffix=c("_", "_1"))
+
+#Make Full Join Overlap of All_Results
+AllResults_MEHP_90_180 <- full_join(AllResults_MEHP_90, AllResults_MEHP_180, by=c("hgnc_symbol"), suffix=c("_90", "_180"))
+AllResults_All_MEHP <- full_join(AllResults_MEHP_90_180, AllResults_MEHP_1, by=c("hgnc_symbol"), suffix=c("_", "_1"))
+
+```
+
+## Make Heatmap and/or boxplots for MEHP Shared DEGs 
+```{r Shared DEG visualizations, fig.height=2, fig.width=4}
+#Prepare data for heatmap input
+
+rownames(MEHP_Shared_Sig)<- MEHP_Shared_Sig$hgnc_symbol
+MEHP_Shared_DEGs <- rownames(MEHP_Shared_Sig)
+write.csv(MEHP_Shared_Sig, "/Volumes/paquette_a/slapehn/Phthalate_RNAseq_CombinedAnalysis/MEHP_HTR8_CPM/Heatmap_Files/MEHP_Shared_Sig.csv")
+
+#Reading in rearranged CSV file of MEHP_Shared_Sig with only LogFCs and Gene names
+MEHP_Shared_DEGs_forHeatmap <- read.csv("/Volumes/paquette_a/slapehn/Phthalate_RNAseq_CombinedAnalysis/MEHP_HTR8_CPM/Heatmap_Files/MEHP_Heatmap_Matrix.csv")
+rownames(MEHP_Shared_DEGs_forHeatmap) <- MEHP_Shared_DEGs_forHeatmap$X
+MEHP_Shared_DEGs_forHeatmapReady <- MEHP_Shared_DEGs_forHeatmap[,c(-1)] 
+
+#Turn data frame into matrix
+MEHP_Heatmap_Matrix <- data.matrix(MEHP_Shared_DEGs_forHeatmapReady)
+MEHP_Heatmap_Matrix_Final<-t(MEHP_Heatmap_Matrix)
+
+col_annot<- colnames(MEHP_Heatmap_Matrix_Final)
+
+Heatmap_Breaks<-seq(-4.8,4.8, length.out=101)
+
+
+pheatmap(MEHP_Heatmap_Matrix_Final, 
+         color=colorRampPalette(c("#0092B3", "White", "#F09062"))(101),
+         #scale='column', # For Scaled Data
+         breaks=Heatmap_Breaks,
+         scale='none',# unscaled data
+         cluster_rows =F,
+         cluster_cols = T,
+         cellwidth=16, #Change tehe for size
+         cellheight=16, #change these for size
+         #number_color = X,
+         treeheight_row = 0,
+         showcolnames=T,
+         fontsize_number = 0.5)
+
+LogCPM_DF <- data.frame(LogCPM)
+LogCPM_DF$Gene <- rownames(LogCPM_DF) 
+```
+
+##Pathway Analysis using Fry and Visualization by Pathview
+Peforming Pathway analysis with Fry. Removing KEGG pathways associated with diseases prior to fry. 
+```{r Fry Pathway Analysis}
+#Prepare Kegg Database
+keggs <- getGeneKEGGLinks()
+keggnum <- as.numeric(gsub("path:hsa", "", keggs[,2]))
+kegg_dontwant <- c(4932, 4931, 4933, 4934, 4936, 4940, 4950, 4930,4949,4959,1501:1503, 1521:1524)
+rmind <- keggnum %in% kegg_dontwant | keggnum > 5000
+keggs <- keggs[!rmind,]
+keggs$SYMBOL <- mapIds(org.Hs.eg.db, keggs[,1], "SYMBOL", "ENTREZID")
+kegglst <- split(keggs$SYMBOL, keggs$PathwayID)
+keggmapper <- read.table("http://rest.kegg.jp/list/pathway/hsa/", sep = "\t", quote = "\"", fill = TRUE, comment.char = "")
+keggmapper[,2] <- sapply(strsplit(keggmapper[,2], " - "), function(x) gsub(" ", "_", paste(x[-length(x)], collapse = " ")))
+keggmapper <- setNames(keggmapper[,2], keggmapper[,1])
+names(kegglst) <- keggmapper[names(kegglst)]
+
+#Run Fry on with Entrez Gene IDs
+kegglst_MEHP_1 <- lapply(kegglst, function(x) which(AllResults_MEHP_1[,5] %in% x))
+kegglst_MEHP_1 <- kegglst_MEHP_1[sapply(kegglst_MEHP_1, length) > 0L]
+
+kegglst_MEHP_90 <- lapply(kegglst, function(x) which(AllResults_MEHP_90[,5] %in% x))
+kegglst_MEHP_90 <- kegglst_MEHP_90[sapply(kegglst_MEHP_90, length) > 0L]
+
+kegglst_MEHP_180 <- lapply(kegglst, function(x) which(AllResults_MEHP_180[,5] %in% x))
+kegglst_MEHP_180 <- kegglst_MEHP_180[sapply(kegglst_MEHP_180, length) > 0L]
+
+fry_MEHP_1 <- fry(estimateDisp(y_Final, design), kegglst_MEHP_1, design, contrast=c(0, -1, 1, 0, 0))
+
+fry_MEHP_90 <- fry(estimateDisp(y_Final, design), kegglst_MEHP_90, design, contrast=c(-1, 0, 0, 1, 0))
+
+fry_MEHP_180 <- fry(estimateDisp(y_Final, design), kegglst_MEHP_180, design, contrast=c(-1, 0, 0, 0, 1))
+
+#Pull Fry Significant Fry Results
+
+Fry_FDR_MEHP_1 <- fry_MEHP_1 %>%
+  dplyr::filter(FDR<0.05) %>%
+  arrange(FDR)
+Fry_FDR_MEHP_1$ID <- rownames(Fry_FDR_MEHP_1)
+head(Fry_FDR_MEHP_1$ID, 10)
+
+
+Fry_FDR_MEHP_90 <- fry_MEHP_90 %>%
+  dplyr::filter(FDR<0.05) %>%
+  arrange(FDR)
+Fry_FDR_MEHP_90$ID <- rownames(Fry_FDR_MEHP_90)
+#Printing top 10 of 62
+head(Fry_FDR_MEHP_90$ID, 10)
+
+
+Fry_FDR_MEHP_180 <- fry_MEHP_180 %>%
+  dplyr::filter(FDR<0.05) %>%
+  arrange(FDR)
+Fry_FDR_MEHP_180$ID <- rownames(Fry_FDR_MEHP_180)
+#Printing Top 10 of 108 pathways
+head(Fry_FDR_MEHP_180$ID, 10)
+
+
+#Find Shared Pathways Across Dose Groups
+# Look for common significant pathways and add sum(FDR)
+Fry_FDR_Combined_MEHP_90_180 <- inner_join(Fry_FDR_MEHP_90, Fry_FDR_MEHP_180, by=c("ID"), suffix=c("_90", "_180")) %>%
+  mutate(sum_FDR_90_180= FDR_90 + FDR_180) %>%
+  arrange(sum_FDR_90_180)
+#Printing Top 10 Shared Pathways between 90uM and 180uM MEHP
+head(Fry_FDR_Combined_MEHP_90_180$ID, 10)
+
+Fry_FDR_Combined_All_MEHP<- inner_join(Fry_FDR_MEHP_1, Fry_FDR_Combined_MEHP_90_180, by=c("ID"), suffix=c("_1", "_")) %>%
+  mutate(sum_FDR_All= sum_FDR_90_180 + FDR) %>%
+  arrange(sum_FDR_All)
+#No Pathways to Print
+
+#Full join of all Sig Pathways
+Fry_FDR_AllPathways_MEHP_90_180 <- full_join(Fry_FDR_MEHP_90, Fry_FDR_MEHP_180, by=c("ID"), suffix=c("_90", "_180")) 
+write.csv(Fry_FDR_AllPathways_MEHP_90_180, "/Volumes/paquette_a/slapehn/Phthalate_RNAseq_CombinedAnalysis/MEHP_HTR8_CPM/Pathway_Files/HTR8_AllSigPathways.csv")
+```
+
+## Candle Gene Comparison
+Comparing the DEG lists from HTR-8/SVneo cells to DEGs from the CANDLE study of Phthalates and the placental transcriptome (Paquette et al. 2021, EHP)
+```{r Compare to CANDLE EHP Findings}
+
+Sig_CANDLE_All <- read.csv("/Volumes/paquette_a/slapehn/ECHOPathwaysPhthalateAnalysis/SignificantFindingsEHP.csv")
+
+Sig_CANDLE_MEHP <- Sig_CANDLE_All %>%
+  dplyr::filter(Phthalate=="MEHP")
+
+Sig_CANDLE_MCIOP <- Sig_CANDLE_All %>%
+  dplyr::filter(Phthalate=="MCIOP")
+
+# Compare to Sig genes from HTR8 by Phthalate
+
+Sig_CANDLE_HTR8_MEHP <- inner_join(Sig_CANDLE_MEHP, Sig_All_MEHP, by=c("Gene"="hgnc_symbol"), suffix=c("_CANDLE", "_HTR8"))
+```
+
+## KEGG Pathway Bubble Plot of Shared Pathways
+```{r Bubble Plot, fig.height=4.5, fig.width=6.5}
+library(scales)
+All_Sig_KEGG <- read.csv("/Volumes/paquette_a/slapehn/Phthalate_RNAseq_CombinedAnalysis/MEHP_HTR8_CPM/Pathway_Files/HTR8_SharedPathway_Bubble.csv")
+
+All_Sig_KEGG$Group <- factor(All_Sig_KEGG$Group, levels=c("90uM MEHP", "180uM MEHP"))
+All_Sig_KEGG$Pathway<- factor(All_Sig_KEGG$Pathway)
+All_Sig_KEGG$Pathway<- reorder(All_Sig_KEGG$Pathway, All_Sig_KEGG$Sort)
+All_Sig_KEGG$KEGG.Category <- factor(All_Sig_KEGG$KEGG.Category)
+
+ggplot(All_Sig_KEGG, aes(x=Group, y=Pathway, color=Direction)) + 
+  geom_point(aes(size = -log10(FDR))) +
+  theme_bw() + 
+  ggtitle("HTR-8/SVneo- KEGG Pathways") + 
+  scale_color_manual(values=c("Up"="#F09062", "Down"="#0092B3"))+
+  theme(plot.title=element_text(size=8), axis.text.y=element_text(size=10), axis.text.x=element_text(size=6))
+```
+
+## lncRNA Sig Results
+Identifying the number of lncRNAs present in DEG lists for each phthalate concentration. 
+```{r lncRNA}
+Sig_MEHP_1_lncRNA <- Sig_MEHP_1 %>%
+  filter(gene_biotype=="lncRNA")
+
+Sig_MEHP_90_lncRNA <- Sig_MEHP_90 %>%
+  filter(gene_biotype=="lncRNA")
+
+Sig_MEHP_180_lncRNA <- Sig_MEHP_180 %>%
+  filter(gene_biotype=="lncRNA")
+
+```
+
+#Transcription Factor Data Upload + Combine
+Uploading results of transcription factor enrichment performed in Enrichr (https://maayanlab.cloud/Enrichr/).
+```{r TF Upload and Combine}
+Enrichr_Sig_90uM <- read.csv("/Volumes/paquette_a/slapehn/Phthalate_RNAseq_CombinedAnalysis/MEHP_HTR8_CPM/TF_Files/HTR8_Enrichr_Results/Sig_MEHP_90.csv")
+Enrichr_Sig_180uM <-read.csv("/Volumes/paquette_a/slapehn/Phthalate_RNAseq_CombinedAnalysis/MEHP_HTR8_CPM/TF_Files/HTR8_Enrichr_Results/Sig_MEHP_180.csv")
+
+Enrichr_AllSig_TFs <- full_join(Enrichr_Sig_90uM, Enrichr_Sig_180uM, by=c("Combine"), suffix=c("_H90", "_H180"))
+
+write.csv(Enrichr_AllSig_TFs, "/Volumes/paquette_a/slapehn/Phthalate_RNAseq_CombinedAnalysis/MEHP_HTR8_CPM/TF_Files/HTR8_Enrichr_Results/Enrichr_AllSig_TFs.csv")
+```
+
+#Targeted TF- Gene Search
+Uploading lists of genes associated with TFs from the Enrichr analysis to pull logFC information for each gene. 
+```{r TF Gene Search}
+#Step 1: Load Gene of Interest Lists
+PPARG_90uM <- read.csv("/Volumes/paquette_a/slapehn/Phthalate_RNAseq_CombinedAnalysis/MEHP_HTR8_CPM/TF_Files/Targeted_TF_Genes/PPARG_HTR8_90.csv")
+PPARG_180uM <- read.csv("/Volumes/paquette_a/slapehn/Phthalate_RNAseq_CombinedAnalysis/MEHP_HTR8_CPM/TF_Files/Targeted_TF_Genes/PPARG_HTR8_180.csv")
+PPARD_90uM <- read.csv("/Volumes/paquette_a/slapehn/Phthalate_RNAseq_CombinedAnalysis/MEHP_HTR8_CPM/TF_Files/Targeted_TF_Genes/PPARD_HTR8_90.csv")
+PPARD_180uM <- read.csv("/Volumes/paquette_a/slapehn/Phthalate_RNAseq_CombinedAnalysis/MEHP_HTR8_CPM/TF_Files/Targeted_TF_Genes/PPARD_HTR8_180.csv")
+AR_90uM <- read.csv("/Volumes/paquette_a/slapehn/Phthalate_RNAseq_CombinedAnalysis/MEHP_HTR8_CPM/TF_Files/Targeted_TF_Genes/AR_HTR8_90.csv")
+AR_180uM <- read.csv("/Volumes/paquette_a/slapehn/Phthalate_RNAseq_CombinedAnalysis/MEHP_HTR8_CPM/TF_Files/Targeted_TF_Genes/AR_HTR8_180.csv")
+ESR1_90uM <- read.csv("/Volumes/paquette_a/slapehn/Phthalate_RNAseq_CombinedAnalysis/MEHP_HTR8_CPM/TF_Files/Targeted_TF_Genes/ESR1_HTR8_90.csv")
+ESR1_180uM <- read.csv("/Volumes/paquette_a/slapehn/Phthalate_RNAseq_CombinedAnalysis/MEHP_HTR8_CPM/TF_Files/Targeted_TF_Genes/ESR1_HTR8_180.csv")
+
+#Step 2: Inner join gene lists with Sig Genes and filter to include only Gene, LogFC, FDR
+PPARG_90uM_HTR8 <- inner_join(PPARG_90uM, Sig_MEHP_90, by=c("Gene"="hgnc_symbol")) %>%
+  dplyr::select("Gene", "logFC", "FDR")
+PPARG_180uM_HTR8 <- inner_join(PPARG_180uM, Sig_MEHP_180, by=c("Gene"="hgnc_symbol")) %>%
+  dplyr::select("Gene", "logFC", "FDR")
+PPARD_90uM_HTR8 <- inner_join(PPARD_90uM, Sig_MEHP_90, by=c("Gene"="hgnc_symbol")) %>%
+  dplyr::select("Gene", "logFC", "FDR")
+PPARD_180uM_HTR8 <- inner_join(PPARD_180uM, Sig_MEHP_180, by=c("Gene"="hgnc_symbol")) %>%
+  dplyr::select("Gene", "logFC", "FDR")
+AR_90uM_HTR8 <- inner_join(AR_90uM, Sig_MEHP_90, by=c("Gene"="hgnc_symbol")) %>%
+  dplyr::select("Gene", "logFC", "FDR")
+AR_180uM_HTR8 <- inner_join(AR_180uM, Sig_MEHP_180, by=c("Gene"="hgnc_symbol")) %>%
+  dplyr::select("Gene", "logFC", "FDR")
+ESR1_90uM_HTR8 <- inner_join(ESR1_90uM, Sig_MEHP_90, by=c("Gene"="hgnc_symbol")) %>%
+  dplyr::select("Gene", "logFC", "FDR")
+ESR1_180uM_HTR8 <- inner_join(ESR1_180uM, Sig_MEHP_180, by=c("Gene"="hgnc_symbol")) %>%
+  dplyr::select("Gene", "logFC", "FDR")
+
+#Step 3: Write CSV files
+write.csv(PPARG_90uM_HTR8, "/Volumes/paquette_a/slapehn/Phthalate_RNAseq_CombinedAnalysis/MEHP_HTR8_CPM/TF_Files/Targeted_TF_Genes_forHeatmap/PPARG_90uM_HTR8.csv")
+write.csv(PPARG_180uM_HTR8, "/Volumes/paquette_a/slapehn/Phthalate_RNAseq_CombinedAnalysis/MEHP_HTR8_CPM/TF_Files/Targeted_TF_Genes_forHeatmap/PPARG_180uM_HTR8.csv")
+write.csv(PPARD_90uM_HTR8, "/Volumes/paquette_a/slapehn/Phthalate_RNAseq_CombinedAnalysis/MEHP_HTR8_CPM/TF_Files/Targeted_TF_Genes_forHeatmap/PPARD_90uM_HTR8.csv")
+write.csv(PPARD_180uM_HTR8, "/Volumes/paquette_a/slapehn/Phthalate_RNAseq_CombinedAnalysis/MEHP_HTR8_CPM/TF_Files/Targeted_TF_Genes_forHeatmap/PPARD_180uM_HTR8.csv")
+write.csv(AR_90uM_HTR8, "/Volumes/paquette_a/slapehn/Phthalate_RNAseq_CombinedAnalysis/MEHP_HTR8_CPM/TF_Files/Targeted_TF_Genes_forHeatmap/AR_90uM_HTR8.csv")
+write.csv(AR_180uM_HTR8, "/Volumes/paquette_a/slapehn/Phthalate_RNAseq_CombinedAnalysis/MEHP_HTR8_CPM/TF_Files/Targeted_TF_Genes_forHeatmap/AR_180uM_HTR8.csv")
+write.csv(ESR1_90uM_HTR8, "/Volumes/paquette_a/slapehn/Phthalate_RNAseq_CombinedAnalysis/MEHP_HTR8_CPM/TF_Files/Targeted_TF_Genes_forHeatmap/ESR1_90uM_HTR8.csv")
+write.csv(ESR1_180uM_HTR8, "/Volumes/paquette_a/slapehn/Phthalate_RNAseq_CombinedAnalysis/MEHP_HTR8_CPM/TF_Files/Targeted_TF_Genes_forHeatmap/ESR1_180uM_HTR8.csv")
+```
+
